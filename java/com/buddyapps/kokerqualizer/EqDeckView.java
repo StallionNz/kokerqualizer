@@ -8,6 +8,8 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Shader;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.animation.DecelerateInterpolator;
@@ -19,20 +21,22 @@ public class EqDeckView extends View {
     public interface Listener {
         void onBandChanging(int bandIndex, float gainDb);
         void onBandChangeFinished();
+        void onBandLongPress(int bandIndex, String freqLabel, float currentDb);
         void onLockedTouch();
     }
 
     private float[] gains = new float[10];
-    private float[] animStart = new float[10];
-    private float[] animTarget = new float[10];
+    private float[] animStart = new float[15];
+    private float[] animTarget = new float[15];
     private ValueAnimator morphAnim;
+    private int bandMode = EqStore.BANDS_10;
     private int bandCount = 10;
     private boolean carSubMode = false;
     private boolean curveMode = false;
     private boolean brushMode = false;
     private boolean locked = false;
     private boolean eqActive = true;
-    private int accentColor = 0xFF39FF14;
+    private int accentColor = EqStore.DEFAULT_ACCENT;
     private Listener listener;
 
     private int draggingBand = -1;
@@ -41,6 +45,30 @@ public class EqDeckView extends View {
     private int lastTappedBand = -1;
     private long lastTapMs = 0;
     private int lastHapticStep = Integer.MIN_VALUE;
+
+    // Long-press 0.1 dB precision fine-tune detector
+    private final Handler lpHandler = new Handler(Looper.getMainLooper());
+    private float downX, downY;
+    private int pendingLpBand = -1;
+    private float preLpDb = 0f;
+    private boolean lpTriggered = false;
+    private final Runnable lpRunnable = () -> {
+        if (pendingLpBand >= 0 && pendingLpBand < bandCount && !locked) {
+            lpTriggered = true;
+            // Restore value prior to accidental down-jump before opening precision dialog
+            gains[pendingLpBand] = preLpDb;
+            if (listener != null) {
+                listener.onBandChanging(pendingLpBand, preLpDb);
+                String[] labels = activeLabels();
+                String fLbl = labels[pendingLpBand];
+                fLbl = fLbl.endsWith("k") ? (fLbl + "Hz") : (fLbl + " Hz");
+                UiStyle.hapticTick(this, getContext());
+                listener.onBandLongPress(pendingLpBand, fLbl, preLpDb);
+            }
+            draggingBand = -1;
+            invalidate();
+        }
+    };
 
     private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint zeroPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -78,14 +106,12 @@ public class EqDeckView extends View {
 
         thumbPaint.setStyle(Paint.Style.FILL);
         thumbBorderPaint.setStyle(Paint.Style.STROKE);
-        thumbBorderPaint.setStrokeWidth(UiStyle.dpf(context, 1.5f));
+        thumbBorderPaint.setStrokeWidth(UiStyle.dpf(context, 1.4f));
 
-        labelPaint.setTextSize(UiStyle.dpf(context, 10.5f));
         labelPaint.setColor(UiStyle.TEXT_SECONDARY);
         labelPaint.setTextAlign(Paint.Align.CENTER);
         labelPaint.setFakeBoldText(true);
 
-        valPaint.setTextSize(UiStyle.dpf(context, 9.5f));
         valPaint.setColor(UiStyle.TEXT_PRIMARY);
         valPaint.setTextAlign(Paint.Align.CENTER);
 
@@ -109,13 +135,18 @@ public class EqDeckView extends View {
 
     public void setListener(Listener l) { this.listener = l; }
 
-    public void setState(float[] bands10, boolean tenBand, boolean carSub,
+    public void setState(float[] bands10, float[] bands15, int mode, boolean carSub,
                          boolean curve, boolean brush, boolean locked,
                          boolean eqActive, int accentColor, boolean animate) {
-        int newCount = tenBand ? 10 : 5;
-        float[] nextTarget = tenBand ? Arrays.copyOf(bands10, 10) : EqStore.to5Bands(bands10);
+        int newCount = (mode == EqStore.BANDS_15) ? 15 : (mode == EqStore.BANDS_10 ? 10 : 5);
+        float[] nextTarget;
+        if (mode == EqStore.BANDS_15) nextTarget = Arrays.copyOf(bands15, 15);
+        else if (mode == EqStore.BANDS_10) nextTarget = Arrays.copyOf(bands10, 10);
+        else nextTarget = EqStore.to5Bands(bands10);
+
         boolean sameCount = (this.bandCount == newCount) && (this.gains.length == newCount);
 
+        this.bandMode = mode;
         this.bandCount = newCount;
         this.carSubMode = carSub;
         this.curveMode = curve;
@@ -134,7 +165,7 @@ public class EqDeckView extends View {
             animTarget = Arrays.copyOf(nextTarget, newCount);
             boolean diff = false;
             for (int i = 0; i < newCount; i++) {
-                if (Math.abs(animStart[i] - animTarget[i]) > 0.1f) { diff = true; break; }
+                if (Math.abs(animStart[i] - animTarget[i]) > 0.08f) { diff = true; break; }
             }
             if (diff) {
                 morphAnim = ValueAnimator.ofFloat(0f, 1f);
@@ -157,8 +188,8 @@ public class EqDeckView extends View {
 
     private float topY() { return UiStyle.dpf(getContext(), 32f); }
     private float bottomY() { return getHeight() - UiStyle.dpf(getContext(), 30f); }
-    private float leftX() { return UiStyle.dpf(getContext(), 30f); }
-    private float rightX() { return getWidth() - UiStyle.dpf(getContext(), 12f); }
+    private float leftX() { return UiStyle.dpf(getContext(), 28f); }
+    private float rightX() { return getWidth() - UiStyle.dpf(getContext(), 10f); }
 
     private float bandX(int idx) {
         float lx = leftX();
@@ -192,9 +223,9 @@ public class EqDeckView extends View {
     }
 
     private String[] activeLabels() {
-        return bandCount == 10
-                ? (carSubMode ? EqStore.SUB_LABELS_10 : EqStore.ISO_LABELS_10)
-                : (carSubMode ? EqStore.SUB_LABELS_5 : EqStore.ISO_LABELS_5);
+        if (bandCount == 15) return EqStore.PRO15_LABELS;
+        if (bandCount == 10) return carSubMode ? EqStore.SUB_LABELS_10 : EqStore.ISO_LABELS_10;
+        return carSubMode ? EqStore.SUB_LABELS_5 : EqStore.ISO_LABELS_5;
     }
 
     @Override
@@ -208,7 +239,9 @@ public class EqDeckView extends View {
         float rx = rightX();
         int col = eqActive ? accentColor : 0xFF475569;
 
-        // Horizontal dB scale lines (+18, +9, 0, -9, -18)
+        labelPaint.setTextSize(UiStyle.dpf(getContext(), bandCount == 15 ? 8.2f : 10.2f));
+        valPaint.setTextSize(UiStyle.dpf(getContext(), bandCount == 15 ? 8.0f : 9.4f));
+
         float[] marks = new float[]{18f, 9f, 0f, -9f, -18f};
         valPaint.setTextAlign(Paint.Align.RIGHT);
         valPaint.setColor(UiStyle.TEXT_MUTED);
@@ -216,17 +249,13 @@ public class EqDeckView extends View {
             float y = dbToY(m);
             canvas.drawLine(lx, y, rx, y, m == 0f ? zeroPaint : gridPaint);
             String txt = (m > 0 ? "+" : "") + (int) m;
-            canvas.drawText(txt, lx - UiStyle.dpf(getContext(), 5f), y + UiStyle.dpf(getContext(), 3.2f), valPaint);
+            canvas.drawText(txt, lx - UiStyle.dpf(getContext(), 4f), y + UiStyle.dpf(getContext(), 3f), valPaint);
         }
         valPaint.setTextAlign(Paint.Align.CENTER);
 
-        if (curveMode) {
-            drawCurve(canvas, t, b, col);
-        } else {
-            drawSliders(canvas, t, b, col);
-        }
+        if (curveMode) drawCurve(canvas, t, b, col);
+        else drawSliders(canvas, t, b, col);
 
-        // Frequency labels along bottom
         String[] labels = activeLabels();
         for (int i = 0; i < bandCount; i++) {
             float x = bandX(i);
@@ -234,11 +263,9 @@ public class EqDeckView extends View {
             canvas.drawText(labels[i], x, getHeight() - UiStyle.dpf(getContext(), 8f), labelPaint);
         }
 
-        // Floating Active Band HUD pill while dragging so thumb never hides exact dB value
         if (draggingBand >= 0 && draggingBand < bandCount) {
             String fLabel = labels[draggingBand];
-            if (!fLabel.endsWith("k")) fLabel = fLabel + " Hz";
-            else fLabel = fLabel + "Hz";
+            fLabel = fLabel.endsWith("k") ? (fLabel + "Hz") : (fLabel + " Hz");
             String hudTxt = String.format(Locale.US, "%s  •  %+.1f dB", fLabel, gains[draggingBand]);
             float tw = hudTextPaint.measureText(hudTxt) + UiStyle.dpf(getContext(), 22f);
             float th = UiStyle.dpf(getContext(), 22f);
@@ -256,9 +283,9 @@ public class EqDeckView extends View {
 
     private void drawSliders(Canvas canvas, float t, float b, int col) {
         float zeroY = dbToY(0f);
-        float trackW = UiStyle.dpf(getContext(), bandCount == 10 ? 5.5f : 8f);
-        float thumbW = UiStyle.dpf(getContext(), bandCount == 10 ? 18f : 28f);
-        float thumbH = UiStyle.dpf(getContext(), 12f);
+        float trackW = UiStyle.dpf(getContext(), bandCount == 15 ? 4.0f : (bandCount == 10 ? 5.5f : 8f));
+        float thumbW = UiStyle.dpf(getContext(), bandCount == 15 ? 13f : (bandCount == 10 ? 18f : 28f));
+        float thumbH = UiStyle.dpf(getContext(), bandCount == 15 ? 10.5f : 12f);
         float r = trackW * 0.5f;
 
         for (int i = 0; i < bandCount; i++) {
@@ -284,14 +311,14 @@ public class EqDeckView extends View {
             thumbPaint.setColor(active ? 0xFF283144 : 0xFF1B2230);
             thumbBorderPaint.setColor(active ? 0xFFFFFFFF : EqStore.withAlpha(col, 220));
             rectF.set(x - thumbW * 0.5f, y - thumbH * 0.5f, x + thumbW * 0.5f, y + thumbH * 0.5f);
-            canvas.drawRoundRect(rectF, UiStyle.dpf(getContext(), 4f), UiStyle.dpf(getContext(), 4f), thumbPaint);
-            canvas.drawRoundRect(rectF, UiStyle.dpf(getContext(), 4f), UiStyle.dpf(getContext(), 4f), thumbBorderPaint);
+            canvas.drawRoundRect(rectF, UiStyle.dpf(getContext(), 3.5f), UiStyle.dpf(getContext(), 3.5f), thumbPaint);
+            canvas.drawRoundRect(rectF, UiStyle.dpf(getContext(), 3.5f), UiStyle.dpf(getContext(), 3.5f), thumbBorderPaint);
 
             canvas.drawLine(x - thumbW * 0.25f, y, x + thumbW * 0.25f, y, thumbBorderPaint);
 
             if (draggingBand < 0) {
-                valPaint.setColor(Math.abs(gains[i]) > 0.1f ? UiStyle.TEXT_PRIMARY : UiStyle.TEXT_MUTED);
-                String dbTxt = gains[i] == 0f ? "0" : String.format(Locale.US, "%+.0f", gains[i]);
+                valPaint.setColor(Math.abs(gains[i]) > 0.05f ? UiStyle.TEXT_PRIMARY : UiStyle.TEXT_MUTED);
+                String dbTxt = Math.abs(gains[i]) < 0.05f ? "0" : String.format(Locale.US, "%+.0f", gains[i]);
                 canvas.drawText(dbTxt, x, UiStyle.dpf(getContext(), 17f), valPaint);
             }
         }
@@ -306,22 +333,15 @@ public class EqDeckView extends View {
             ys[i] = dbToY(gains[i]);
         }
 
-        for (int i = 0; i < bandCount; i++) {
-            canvas.drawLine(xs[i], t, xs[i], b, gridPaint);
-        }
+        for (int i = 0; i < bandCount; i++) canvas.drawLine(xs[i], t, xs[i], b, gridPaint);
 
         curvePath.reset();
         curvePath.moveTo(xs[0], ys[0]);
         for (int i = 0; i < bandCount - 1; i++) {
-            float x0 = xs[Math.max(0, i - 1)];
-            float y0 = ys[Math.max(0, i - 1)];
-            float x1 = xs[i];
-            float y1 = ys[i];
-            float x2 = xs[i + 1];
-            float y2 = ys[i + 1];
-            float x3 = xs[Math.min(bandCount - 1, i + 2)];
-            float y3 = ys[Math.min(bandCount - 1, i + 2)];
-
+            float x0 = xs[Math.max(0, i - 1)], y0 = ys[Math.max(0, i - 1)];
+            float x1 = xs[i], y1 = ys[i];
+            float x2 = xs[i + 1], y2 = ys[i + 1];
+            float x3 = xs[Math.min(bandCount - 1, i + 2)], y3 = ys[Math.min(bandCount - 1, i + 2)];
             float cp1x = x1 + (x2 - x0) / 6f;
             float cp1y = EqStore.clamp(y1 + (y2 - y0) / 6f, t, b);
             float cp2x = x2 - (x3 - x1) / 6f;
@@ -349,7 +369,7 @@ public class EqDeckView extends View {
         curveLinePaint.setColor(col);
         canvas.drawPath(curvePath, curveLinePaint);
 
-        float nodeR = UiStyle.dpf(getContext(), bandCount == 10 ? 6f : 8f);
+        float nodeR = UiStyle.dpf(getContext(), bandCount == 15 ? 4.8f : (bandCount == 10 ? 6f : 8f));
         for (int i = 0; i < bandCount; i++) {
             boolean active = (i == draggingBand);
             glowPaint.setColor(EqStore.withAlpha(col, active ? 130 : 60));
@@ -361,8 +381,8 @@ public class EqDeckView extends View {
             canvas.drawCircle(xs[i], ys[i], nodeR, thumbBorderPaint);
 
             if (draggingBand < 0) {
-                valPaint.setColor(Math.abs(gains[i]) > 0.1f ? UiStyle.TEXT_PRIMARY : UiStyle.TEXT_MUTED);
-                String dbTxt = gains[i] == 0f ? "0" : String.format(Locale.US, "%+.0f", gains[i]);
+                valPaint.setColor(Math.abs(gains[i]) > 0.05f ? UiStyle.TEXT_PRIMARY : UiStyle.TEXT_MUTED);
+                String dbTxt = Math.abs(gains[i]) < 0.05f ? "0" : String.format(Locale.US, "%+.0f", gains[i]);
                 canvas.drawText(dbTxt, xs[i], UiStyle.dpf(getContext(), 17f), valPaint);
             }
         }
@@ -370,25 +390,32 @@ public class EqDeckView extends View {
 
     @Override
     protected void onDetachedFromWindow() {
+        lpHandler.removeCallbacks(lpRunnable);
         if (morphAnim != null) { morphAnim.cancel(); morphAnim = null; }
         super.onDetachedFromWindow();
     }
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
-        if (locked) {
-            return false; // Let parent ScrollView scroll smoothly with zero lock-toast spam
-        }
+        if (locked) return false;
         int action = e.getActionMasked();
+        float slop = UiStyle.dpf(getContext(), 8f);
+
         if (action == MotionEvent.ACTION_DOWN) {
             if (morphAnim != null) { morphAnim.cancel(); morphAnim = null; }
             if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+            lpHandler.removeCallbacks(lpRunnable);
+            lpTriggered = false;
+            downX = e.getX();
+            downY = e.getY();
+
             int idx = xToBand(e.getX());
             long now = System.currentTimeMillis();
             if (idx == lastTappedBand && (now - lastTapMs) < 320) {
                 gains[idx] = 0f;
                 lastTappedBand = -1;
                 draggingBand = -1;
+                pendingLpBand = -1;
                 UiStyle.hapticTick(this, getContext());
                 if (listener != null) {
                     listener.onBandChanging(idx, 0f);
@@ -400,25 +427,30 @@ public class EqDeckView extends View {
             lastTappedBand = idx;
             lastTapMs = now;
             draggingBand = idx;
+            pendingLpBand = idx;
+            preLpDb = gains[idx];
             lastBrushBand = idx;
             lastBrushDb = yToDb(e.getY());
             lastHapticStep = Math.round(gains[idx]);
+            lpHandler.postDelayed(lpRunnable, 480);
             applyDrag(idx, lastBrushDb);
             return true;
         } else if (action == MotionEvent.ACTION_MOVE) {
-            if (locked) return true;
+            if (lpTriggered) return true;
+            if (Math.hypot(e.getX() - downX, e.getY() - downY) > slop) {
+                lpHandler.removeCallbacks(lpRunnable);
+                pendingLpBand = -1;
+            }
             float newDb = yToDb(e.getY());
             if (brushMode) {
                 int idx = xToBand(e.getX());
                 if (lastBrushBand >= 0 && Math.abs(idx - lastBrushBand) > 1) {
-                    // Smoothly interpolate across skipped bands during fast brush swipes
                     int step = idx > lastBrushBand ? 1 : -1;
                     int span = Math.abs(idx - lastBrushBand);
                     for (int k = 1; k <= span; k++) {
                         int bIdx = lastBrushBand + k * step;
                         float frac = (float) k / span;
-                        float interp = lastBrushDb + (newDb - lastBrushDb) * frac;
-                        interp = Math.round(interp * 2f) / 2f;
+                        float interp = Math.round((lastBrushDb + (newDb - lastBrushDb) * frac) * 2f) / 2f;
                         applyDrag(bIdx, interp);
                     }
                 } else {
@@ -432,8 +464,10 @@ public class EqDeckView extends View {
             }
             return true;
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            lpHandler.removeCallbacks(lpRunnable);
+            pendingLpBand = -1;
             if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
-            if (!locked && draggingBand >= 0 && listener != null) {
+            if (!lpTriggered && draggingBand >= 0 && listener != null) {
                 listener.onBandChangeFinished();
             }
             draggingBand = -1;

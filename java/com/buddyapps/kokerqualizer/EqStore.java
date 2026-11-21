@@ -25,6 +25,16 @@ public class EqStore {
     public static final int BASS_DEEP = 1;
     public static final int BASS_BOOMY = 2;
 
+    public static final int REVERB_OFF = 0;
+    public static final int REVERB_STUDIO = 1;
+    public static final int REVERB_CLUB = 2;
+    public static final int REVERB_HALL = 3;
+    public static final int REVERB_CAR = 4;
+
+    public static final int BANDS_5 = 0;
+    public static final int BANDS_10 = 1;
+    public static final int BANDS_15 = 2;
+
     public static final int VIZ_BARS = 0;
     public static final int VIZ_WAVE = 1;
     public static final int VIZ_VU = 2;
@@ -68,6 +78,14 @@ public class EqStore {
             "35", "110", "450", "1.8k", "9k"
     };
 
+    // Classic 15-Band Pro 2/3-Octave Studio EQ
+    public static final float[] PRO15_CENTERS = new float[] {
+            25f, 40f, 63f, 100f, 160f, 250f, 400f, 630f, 1000f, 1600f, 2500f, 4000f, 6300f, 10000f, 16000f
+    };
+    public static final String[] PRO15_LABELS = new String[] {
+            "25", "40", "63", "100", "160", "250", "400", "630", "1k", "1.6k", "2.5k", "4k", "6.3k", "10k", "16k"
+    };
+
     public static class EqPreset {
         public String id;
         public String name;
@@ -76,13 +94,15 @@ public class EqStore {
         public boolean favorite = false;
         public boolean pinnedCar = false;
         public float[] bands10 = new float[10];
+        public float[] bands15 = new float[15];
         public float bassBoost = 0f;       // 0..100
         public int bassStyle = BASS_TIGHT; // 0..2
-        public float punchMbc = 25f;       // 0..100 (3-band Multiband Compressor)
+        public float punchMbc = 25f;       // 0..100
         public float preampDb = 0f;        // -12..+12
         public float limiter = 65f;        // 0..100
         public float virtualizer = 0f;     // 0..100
         public float balance = 0f;         // -100..+100
+        public int reverbMode = REVERB_OFF;// 0..4
         public boolean carSubMode = false;
 
         public EqPreset copy(String newId, String newName, boolean isBuiltIn) {
@@ -94,6 +114,7 @@ public class EqStore {
             p.favorite = favorite;
             p.pinnedCar = pinnedCar;
             p.bands10 = Arrays.copyOf(bands10, 10);
+            p.bands15 = Arrays.copyOf(bands15, 15);
             p.bassBoost = bassBoost;
             p.bassStyle = bassStyle;
             p.punchMbc = punchMbc;
@@ -101,6 +122,7 @@ public class EqStore {
             p.limiter = limiter;
             p.virtualizer = virtualizer;
             p.balance = balance;
+            p.reverbMode = reverbMode;
             p.carSubMode = carSubMode;
             return p;
         }
@@ -114,9 +136,12 @@ public class EqStore {
                 o.put("builtIn", builtIn);
                 o.put("favorite", favorite);
                 o.put("pinnedCar", pinnedCar);
-                JSONArray arr = new JSONArray();
-                for (int i = 0; i < 10; i++) arr.put((double) bands10[i]);
-                o.put("bands10", arr);
+                JSONArray arr10 = new JSONArray();
+                for (int i = 0; i < 10; i++) arr10.put((double) bands10[i]);
+                o.put("bands10", arr10);
+                JSONArray arr15 = new JSONArray();
+                for (int i = 0; i < 15; i++) arr15.put((double) bands15[i]);
+                o.put("bands15", arr15);
                 o.put("bassBoost", (double) bassBoost);
                 o.put("bassStyle", bassStyle);
                 o.put("punchMbc", (double) punchMbc);
@@ -124,6 +149,7 @@ public class EqStore {
                 o.put("limiter", (double) limiter);
                 o.put("virtualizer", (double) virtualizer);
                 o.put("balance", (double) balance);
+                o.put("reverbMode", reverbMode);
                 o.put("carSubMode", carSubMode);
             } catch (Exception ignored) {}
             return o;
@@ -137,11 +163,19 @@ public class EqStore {
             p.builtIn = o.optBoolean("builtIn", false);
             p.favorite = o.optBoolean("favorite", false);
             p.pinnedCar = o.optBoolean("pinnedCar", false);
-            JSONArray arr = o.optJSONArray("bands10");
-            if (arr != null) {
-                for (int i = 0; i < Math.min(10, arr.length()); i++) {
-                    p.bands10[i] = clamp((float) arr.optDouble(i, 0.0), -MAX_GAIN_DB, MAX_GAIN_DB);
+            JSONArray arr10 = o.optJSONArray("bands10");
+            if (arr10 != null) {
+                for (int i = 0; i < Math.min(10, arr10.length()); i++) {
+                    p.bands10[i] = clamp((float) arr10.optDouble(i, 0.0), -MAX_GAIN_DB, MAX_GAIN_DB);
                 }
+            }
+            JSONArray arr15 = o.optJSONArray("bands15");
+            if (arr15 != null && arr15.length() >= 15) {
+                for (int i = 0; i < 15; i++) {
+                    p.bands15[i] = clamp((float) arr15.optDouble(i, 0.0), -MAX_GAIN_DB, MAX_GAIN_DB);
+                }
+            } else {
+                p.bands15 = resample10To15(p.bands10);
             }
             p.bassBoost = clamp((float) o.optDouble("bassBoost", 0.0), 0f, 100f);
             p.bassStyle = Math.max(0, Math.min(2, o.optInt("bassStyle", BASS_TIGHT)));
@@ -150,6 +184,7 @@ public class EqStore {
             p.limiter = clamp((float) o.optDouble("limiter", 65.0), 0f, 100f);
             p.virtualizer = clamp((float) o.optDouble("virtualizer", 0.0), 0f, 100f);
             p.balance = clamp((float) o.optDouble("balance", 0.0), -100f, 100f);
+            p.reverbMode = Math.max(0, Math.min(4, o.optInt("reverbMode", REVERB_OFF)));
             p.carSubMode = o.optBoolean("carSubMode", false);
             return p;
         }
@@ -193,11 +228,13 @@ public class EqStore {
 
     public static class Settings {
         public boolean eqEnabled = true;
-        public boolean tenBandMode = true;
+        public int bandMode = BANDS_10; // 0=5B, 1=10B, 2=15B Pro
         public boolean curveViewMode = false;
         public boolean brushMode = false;
         public boolean presetLocked = false;
         public boolean autoGain = true;
+        public boolean autoLoudness = false;
+        public boolean monoAudio = false;
         public boolean hapticsEnabled = true;
         public boolean reactiveGlow = true;
         public boolean highwayBoost = false;
@@ -212,6 +249,7 @@ public class EqStore {
         public boolean bubbleAutoOnBt = false;
         public int bubbleY = 380;
         public boolean bubbleRightEdge = true;
+        public boolean morphPadVisible = false;
         public String activePresetId = "car_bass";
         public String phonePresetId = "phone_speaker";
 
@@ -219,11 +257,14 @@ public class EqStore {
             JSONObject o = new JSONObject();
             try {
                 o.put("eqEnabled", eqEnabled);
-                o.put("tenBandMode", tenBandMode);
+                o.put("bandMode", bandMode);
+                o.put("tenBandMode", bandMode >= BANDS_10);
                 o.put("curveViewMode", curveViewMode);
                 o.put("brushMode", brushMode);
                 o.put("presetLocked", presetLocked);
                 o.put("autoGain", autoGain);
+                o.put("autoLoudness", autoLoudness);
+                o.put("monoAudio", monoAudio);
                 o.put("hapticsEnabled", hapticsEnabled);
                 o.put("reactiveGlow", reactiveGlow);
                 o.put("highwayBoost", highwayBoost);
@@ -238,6 +279,7 @@ public class EqStore {
                 o.put("bubbleAutoOnBt", bubbleAutoOnBt);
                 o.put("bubbleY", bubbleY);
                 o.put("bubbleRightEdge", bubbleRightEdge);
+                o.put("morphPadVisible", morphPadVisible);
                 o.put("activePresetId", activePresetId);
                 o.put("phonePresetId", phonePresetId);
             } catch (Exception ignored) {}
@@ -248,11 +290,17 @@ public class EqStore {
             Settings s = new Settings();
             if (o == null) return s;
             s.eqEnabled = o.optBoolean("eqEnabled", true);
-            s.tenBandMode = o.optBoolean("tenBandMode", true);
+            if (o.has("bandMode")) {
+                s.bandMode = Math.max(0, Math.min(2, o.optInt("bandMode", BANDS_10)));
+            } else {
+                s.bandMode = o.optBoolean("tenBandMode", true) ? BANDS_10 : BANDS_5;
+            }
             s.curveViewMode = o.optBoolean("curveViewMode", false);
             s.brushMode = o.optBoolean("brushMode", false);
             s.presetLocked = o.optBoolean("presetLocked", false);
             s.autoGain = o.optBoolean("autoGain", true);
+            s.autoLoudness = o.optBoolean("autoLoudness", false);
+            s.monoAudio = o.optBoolean("monoAudio", false);
             s.hapticsEnabled = o.optBoolean("hapticsEnabled", true);
             s.reactiveGlow = o.optBoolean("reactiveGlow", true);
             s.highwayBoost = o.optBoolean("highwayBoost", false);
@@ -267,6 +315,7 @@ public class EqStore {
             s.bubbleAutoOnBt = o.optBoolean("bubbleAutoOnBt", false);
             s.bubbleY = o.optInt("bubbleY", 380);
             s.bubbleRightEdge = o.optBoolean("bubbleRightEdge", true);
+            s.morphPadVisible = o.optBoolean("morphPadVisible", false);
             s.activePresetId = o.optString("activePresetId", "car_bass");
             s.phonePresetId = o.optString("phonePresetId", "phone_speaker");
             return s;
@@ -334,7 +383,6 @@ public class EqStore {
         if (findPreset(settings.wiredPresetId) == null && !presets.isEmpty()) {
             settings.wiredPresetId = presets.get(0).id;
         }
-        // One-time main theme update to Neon Shocking Green (#39FF14)
         if (!prefs.getBoolean(KEY_NEON_GREEN_MIGRATED, false)) {
             for (EqPreset p : presets) {
                 if (p.builtIn || p.id.equals(settings.activePresetId)) {
@@ -358,13 +406,30 @@ public class EqStore {
                 .apply();
     }
 
-    public synchronized Settings getSettings() {
-        return settings;
+    public synchronized int restoreFactoryPresets() {
+        List<EqPreset> defaults = createDefaultPresets();
+        int restored = 0;
+        for (EqPreset def : defaults) {
+            int existingIdx = -1;
+            for (int i = 0; i < presets.size(); i++) {
+                if (presets.get(i).id.equals(def.id)) {
+                    existingIdx = i;
+                    break;
+                }
+            }
+            if (existingIdx >= 0) {
+                presets.set(existingIdx, def);
+            } else {
+                presets.add(0, def);
+            }
+            restored++;
+        }
+        save();
+        return restored;
     }
 
-    public synchronized List<EqPreset> getPresets() {
-        return new ArrayList<>(presets);
-    }
+    public synchronized Settings getSettings() { return settings; }
+    public synchronized List<EqPreset> getPresets() { return new ArrayList<>(presets); }
 
     public synchronized List<EqPreset> getCarPinnedPresets() {
         List<EqPreset> out = new ArrayList<>();
@@ -444,9 +509,7 @@ public class EqStore {
         return false;
     }
 
-    public synchronized List<BtDeviceRule> getBtRules() {
-        return new ArrayList<>(btRules);
-    }
+    public synchronized List<BtDeviceRule> getBtRules() { return new ArrayList<>(btRules); }
 
     public synchronized BtDeviceRule findBtRule(String address) {
         if (address == null) return null;
@@ -472,7 +535,7 @@ public class EqStore {
         JSONObject root = new JSONObject();
         try {
             root.put("app", "Kokerqualizer");
-            root.put("formatVersion", 2);
+            root.put("formatVersion", 3);
             JSONArray pArr = new JSONArray();
             for (EqPreset p : presets) pArr.put(p.toJson());
             root.put("presets", pArr);
@@ -490,7 +553,7 @@ public class EqStore {
         JSONObject root = new JSONObject();
         try {
             root.put("app", "Kokerqualizer");
-            root.put("formatVersion", 2);
+            root.put("formatVersion", 3);
             root.put("preset", preset.toJson());
             return root.toString(2);
         } catch (Exception e) {
@@ -543,11 +606,36 @@ public class EqStore {
         return b5;
     }
 
-    public static void apply5BandChange(float[] b10, int idx5, float valueDb) {
-        if (idx5 < 0 || idx5 >= 5) return;
+    public static void apply5BandChange(EqPreset p, int idx5, float valueDb) {
+        if (p == null || idx5 < 0 || idx5 >= 5) return;
         float clamped = clamp(valueDb, -MAX_GAIN_DB, MAX_GAIN_DB);
-        b10[idx5 * 2] = clamped;
-        b10[idx5 * 2 + 1] = clamped;
+        p.bands10[idx5 * 2] = clamped;
+        p.bands10[idx5 * 2 + 1] = clamped;
+        p.bands15 = resample10To15(p.bands10);
+    }
+
+    public static float[] resample10To15(float[] b10) {
+        float[] b15 = new float[15];
+        for (int i = 0; i < 15; i++) {
+            float pos = (i * 9f) / 14f;
+            int lo = (int) Math.floor(pos);
+            int hi = Math.min(9, lo + 1);
+            float f = pos - lo;
+            b15[i] = Math.round((b10[lo] * (1f - f) + b10[hi] * f) * 10f) / 10f;
+        }
+        return b15;
+    }
+
+    public static float[] resample15To10(float[] b15) {
+        float[] b10 = new float[10];
+        for (int i = 0; i < 10; i++) {
+            float pos = (i * 14f) / 9f;
+            int lo = (int) Math.floor(pos);
+            int hi = Math.min(14, lo + 1);
+            float f = pos - lo;
+            b10[i] = Math.round((b15[lo] * (1f - f) + b15[hi] * f) * 10f) / 10f;
+        }
+        return b10;
     }
 
     public static float clamp(float v, float min, float max) {
@@ -563,50 +651,60 @@ public class EqStore {
         }
     }
 
+    public static String reverbName(int mode) {
+        switch (mode) {
+            case REVERB_STUDIO: return "Studio";
+            case REVERB_CLUB: return "Club";
+            case REVERB_HALL: return "Hall";
+            case REVERB_CAR: return "Cabin";
+            default: return "Off";
+        }
+    }
+
     private static List<EqPreset> createDefaultPresets() {
         List<EqPreset> list = new ArrayList<>();
 
-        list.add(make("flat", "Flat", 0xFF40C4FF, true, false, false,
+        list.add(make("flat", "Flat", DEFAULT_ACCENT, true, false, false,
                 new float[]{0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
                 0f, BASS_TIGHT, 0f, 0f, 55f, 0f, false));
 
-        list.add(make("phone_speaker", "Phone Speaker", 0xFF00E5FF, true, true, false,
+        list.add(make("phone_speaker", "Phone Speaker", DEFAULT_ACCENT, true, true, false,
                 new float[]{-2f, 1f, 2.5f, 2f, 1.5f, 2f, 3.5f, 4f, 3f, 2f},
                 18f, BASS_TIGHT, 35f, 2f, 70f, 15f, false));
 
-        list.add(make("car_bass", "Car Bass", 0xFFFF3D00, true, true, true,
+        list.add(make("car_bass", "Car Bass", DEFAULT_ACCENT, true, true, true,
                 new float[]{9f, 8f, 5.5f, 2f, 0f, 1f, 3f, 4.5f, 5f, 4f},
                 62f, BASS_DEEP, 50f, 2.5f, 75f, 20f, true));
 
-        list.add(make("portable_speaker", "Portable Speaker", 0xFF00E676, true, true, true,
+        list.add(make("portable_speaker", "Portable Speaker", DEFAULT_ACCENT, true, true, true,
                 new float[]{5f, 6.5f, 4.5f, 2f, 0.5f, 1.5f, 3f, 4f, 4.5f, 3.5f},
                 48f, BASS_DEEP, 45f, 2f, 72f, 25f, false));
 
-        list.add(make("headphones", "Headphones", 0xFFB388FF, true, true, true,
+        list.add(make("headphones", "Headphones", DEFAULT_ACCENT, true, true, true,
                 new float[]{3.5f, 4f, 2.5f, 0.5f, -0.5f, 0.5f, 2f, 3.5f, 4f, 3f},
                 28f, BASS_TIGHT, 20f, 1f, 65f, 35f, false));
 
-        list.add(make("deep_sub", "Deep Sub", 0xFFFF2E93, true, true, true,
+        list.add(make("deep_sub", "Deep Sub", DEFAULT_ACCENT, true, true, true,
                 new float[]{13f, 11.5f, 7.5f, 2.5f, -1f, 0f, 2.5f, 4f, 5f, 4f},
                 82f, BASS_BOOMY, 60f, 3f, 85f, 15f, true));
 
-        list.add(make("edm_club", "EDM / Club", 0xFFC6FF00, true, false, true,
+        list.add(make("edm_club", "EDM / Club", DEFAULT_ACCENT, true, false, true,
                 new float[]{8.5f, 7.5f, 4.5f, 1f, -1.5f, 0.5f, 3.5f, 5.5f, 6.5f, 5.5f},
                 68f, BASS_DEEP, 55f, 2f, 80f, 30f, true));
 
-        list.add(make("hip_hop", "Hip-Hop", 0xFFFFB300, true, false, true,
+        list.add(make("hip_hop", "Hip-Hop", DEFAULT_ACCENT, true, false, true,
                 new float[]{10f, 9f, 6f, 2f, -1f, 1.5f, 3f, 2.5f, 4f, 4.5f},
                 75f, BASS_BOOMY, 55f, 2f, 80f, 20f, true));
 
-        list.add(make("rock_metal", "Rock / Metal", 0xFFFF6D00, true, false, false,
+        list.add(make("rock_metal", "Rock / Metal", DEFAULT_ACCENT, true, false, false,
                 new float[]{5f, 4.5f, 2f, -1f, -2.5f, 1f, 4f, 5.5f, 6f, 4.5f},
                 35f, BASS_TIGHT, 40f, 1.5f, 70f, 15f, false));
 
-        list.add(make("vocal_podcast", "Vocal / Podcast", 0xFF1DE9B6, true, false, true,
+        list.add(make("vocal_podcast", "Vocal / Podcast", DEFAULT_ACCENT, true, false, true,
                 new float[]{-4f, -3f, -1f, 1.5f, 3.5f, 5f, 5.5f, 3.5f, 1f, -1f},
                 0f, BASS_TIGHT, 45f, 2.5f, 65f, 0f, false));
 
-        list.add(make("late_night", "Late Night", 0xFF7C4DFF, true, false, false,
+        list.add(make("late_night", "Late Night", DEFAULT_ACCENT, true, false, false,
                 new float[]{4f, 3.5f, 2f, 1f, 1.5f, 2f, 2.5f, 3f, 2.5f, 2f},
                 25f, BASS_TIGHT, 75f, 3f, 90f, 20f, false));
 
@@ -625,6 +723,7 @@ public class EqStore {
         p.favorite = fav;
         p.pinnedCar = pinCar;
         p.bands10 = Arrays.copyOf(b10, 10);
+        p.bands15 = resample10To15(p.bands10);
         p.bassBoost = bass;
         p.bassStyle = bassStyle;
         p.punchMbc = punchMbc;
@@ -632,6 +731,7 @@ public class EqStore {
         p.limiter = limiter;
         p.virtualizer = virt;
         p.balance = 0f;
+        p.reverbMode = REVERB_OFF;
         p.carSubMode = subMode;
         return p;
     }

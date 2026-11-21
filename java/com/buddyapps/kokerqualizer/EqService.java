@@ -199,6 +199,11 @@ public class EqService extends Service {
                     int sid = intent.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION, 0);
                     EqEngine.get(context).onExternalSessionClosed(sid);
                     updateNotificationAndUi();
+                } else if ("android.media.VOLUME_CHANGED_ACTION".equals(a)) {
+                    if (EqStore.get(context).getSettings().autoLoudness) {
+                        EqEngine.get(context).applyCurrent();
+                        updateNotificationAndUi();
+                    }
                 } else if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(a)) {
                     BluetoothDevice dev = extractBtDevice(intent);
                     if (dev != null) handleBtConnected(dev.getAddress(), safeDevName(dev));
@@ -220,6 +225,7 @@ public class EqService extends Service {
         };
 
         IntentFilter f = new IntentFilter();
+        f.addAction("android.media.VOLUME_CHANGED_ACTION");
         f.addAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION);
         f.addAction(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION);
         f.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);

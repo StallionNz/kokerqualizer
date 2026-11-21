@@ -73,9 +73,16 @@ public class DrawerPanels {
 
         actions.addView(new View(ctx), new LinearLayout.LayoutParams(0, 1, 1f));
 
-        TextView saveNew = UiStyle.makePill(ctx, "+ Save As New", true, accent);
+        TextView saveNew = UiStyle.makePill(ctx, "+ Save As", true, accent);
         saveNew.setOnClickListener(v -> showSaveAsDialog(ctx, store, active, host));
         actions.addView(saveNew);
+
+        TextView restoreBtn = UiStyle.makePill(ctx, "↺ Factory", false, accent);
+        restoreBtn.setOnClickListener(v -> showRestoreFactoryDialog(ctx, store, host));
+        LinearLayout.LayoutParams rLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rLp.leftMargin = UiStyle.dp(ctx, 6);
+        actions.addView(restoreBtn, rLp);
         wrap.addView(actions);
 
         LinearLayout ioRow = new LinearLayout(ctx);
@@ -975,6 +982,18 @@ public class DrawerPanels {
             EqEngine.get(ctx).applyCurrent();
             host.onStateMutated();
         });
+        addSettingSwitch(ctx, swCard, "Volume-Aware Auto-Loudness (richer low-vol sound)", s.autoLoudness, val -> {
+            s.autoLoudness = val;
+            store.save();
+            EqEngine.get(ctx).applyCurrent();
+            host.onStateMutated();
+        });
+        addSettingSwitch(ctx, swCard, "Mono Speaker Optimization (single speaker / earbud)", s.monoAudio, val -> {
+            s.monoAudio = val;
+            store.save();
+            EqEngine.get(ctx).applyCurrent();
+            host.onStateMutated();
+        });
         addSettingSwitch(ctx, swCard, "Bass-Reactive Neon Glow on Deck Cards", s.reactiveGlow, val -> {
             s.reactiveGlow = val;
             store.save();
@@ -1291,6 +1310,253 @@ public class DrawerPanels {
         if (mins < 60) return "Synced " + mins + "m ago";
         long hrs = mins / 60;
         return "Synced " + hrs + "h ago";
+    }
+
+    public static void showRestoreFactoryDialog(Context ctx, EqStore store, Host host) {
+        new AlertDialog.Builder(ctx)
+                .setTitle("Restore Factory Presets?")
+                .setMessage("Resets built-in presets to factory tuning and restores any deleted defaults. Your custom presets stay untouched.")
+                .setPositiveButton("Restore", (d, w) -> {
+                    int n = store.restoreFactoryPresets();
+                    EqService.startOrRefresh(ctx);
+                    Toast.makeText(ctx, "Restored " + n + " factory presets!", Toast.LENGTH_SHORT).show();
+                    host.onStateMutated();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    // =========================================================================
+    // 7. GUIDED SPEAKER & CAR CALIBRATION WIZARD (7-Step Stepped Tone Ear/Car Tune!)
+    // =========================================================================
+    private static final float[] CAL_FREQS = new float[]{35f, 70f, 160f, 500f, 2000f, 6000f, 14000f};
+    private static final String[] CAL_NAMES = new String[]{
+            "35 Hz • Deep Sub-Bass",
+            "70 Hz • Kick & Bass Punch",
+            "160 Hz • Upper Bass / Warmth",
+            "500 Hz • Lower Mid / Body",
+            "2.0 kHz • Vocal Presence",
+            "6.0 kHz • Treble Clarity",
+            "14 kHz • Air & Sparkle"
+    };
+
+    public static View buildCalibrationPanel(Context ctx, Host host, int[] stepRef, float[] offsetsRef) {
+        EqStore store = EqStore.get(ctx);
+        EqStore.EqPreset active = store.getActivePreset();
+        int accent = active != null ? active.accentColor : EqStore.DEFAULT_ACCENT;
+        SoundTestEngine ste = host.getSoundTestEngine();
+
+        int step = Math.max(0, Math.min(CAL_FREQS.length - 1, stepRef[0]));
+        float hz = CAL_FREQS[step];
+
+        LinearLayout wrap = new LinearLayout(ctx);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout card = makeCard(ctx, accent);
+
+        TextView progressTv = new TextView(ctx);
+        progressTv.setText(String.format(Locale.US, "STEP %d OF %d  •  SPEAKER CALIBRATION", step + 1, CAL_FREQS.length));
+        progressTv.setTextColor(UiStyle.TEXT_MUTED);
+        progressTv.setTextSize(11.5f);
+        progressTv.setTypeface(null, android.graphics.Typeface.BOLD);
+        card.addView(progressTv);
+
+        TextView freqTv = new TextView(ctx);
+        freqTv.setText(CAL_NAMES[step]);
+        freqTv.setTextColor(accent);
+        freqTv.setTextSize(20f);
+        freqTv.setTypeface(null, android.graphics.Typeface.BOLD);
+        freqTv.setPadding(0, UiStyle.dp(ctx, 6), 0, UiStyle.dp(ctx, 6));
+        card.addView(freqTv);
+
+        TextView guideTv = new TextView(ctx);
+        guideTv.setText("Play the reference tone on your car stereo, portable speaker, or headphones, then tap how loud it sounds compared to normal music. Kokerqualizer will auto-build a compensated preset.");
+        guideTv.setTextColor(UiStyle.TEXT_SECONDARY);
+        guideTv.setTextSize(12.5f);
+        card.addView(guideTv);
+
+        // Play / Stop current step tone button
+        TextView toneBtn = new TextView(ctx);
+        boolean playingThis = ste.isPlaying();
+        stylePlayBtn(ctx, toneBtn, playingThis, accent);
+        toneBtn.setText(playingThis ? ("■  STOP " + (int) hz + " Hz TONE") : ("▶  PLAY " + (int) hz + " Hz TONE"));
+        toneBtn.setOnClickListener(v -> {
+            UiStyle.hapticTick(v, ctx);
+            if (ste.isPlaying()) {
+                ste.stop();
+                stylePlayBtn(ctx, toneBtn, false, accent);
+                toneBtn.setText("▶  PLAY " + (int) hz + " Hz TONE");
+            } else {
+                YouTubePlayerView.RemoteBridge yt = YouTubePlayerView.getActiveRemoteBridge();
+                if (yt != null && yt.isPlaying()) yt.togglePlayPause();
+                ste.setMode(SoundTestEngine.MODE_SINE);
+                ste.setChannelMode(SoundTestEngine.CH_BOTH);
+                ste.setTargetFreqHz(hz);
+                ste.start();
+                stylePlayBtn(ctx, toneBtn, true, accent);
+                toneBtn.setText("■  STOP " + (int) hz + " Hz TONE");
+            }
+        });
+        LinearLayout.LayoutParams tbLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        tbLp.topMargin = UiStyle.dp(ctx, 12);
+        card.addView(toneBtn, tbLp);
+
+        // Safe tone volume slider
+        TextView vLbl = new TextView(ctx);
+        int volPct = Math.round(ste.getVolume() * 100f);
+        vLbl.setText(String.format(Locale.US, "Reference Level: %d%%", volPct));
+        vLbl.setTextColor(UiStyle.TEXT_MUTED);
+        vLbl.setTextSize(11.5f);
+        vLbl.setPadding(0, UiStyle.dp(ctx, 10), 0, UiStyle.dp(ctx, 2));
+        card.addView(vLbl);
+
+        SeekBar volSeek = new SeekBar(ctx);
+        volSeek.setMax(90);
+        volSeek.setProgress(volPct);
+        UiStyle.tintSeekBar(volSeek, accent);
+        volSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar sb, int p, boolean fromUser) {
+                int c = Math.max(5, p);
+                ste.setVolume(c / 100f);
+                vLbl.setText(String.format(Locale.US, "Reference Level: %d%%", c));
+            }
+            @Override public void onStartTrackingTouch(SeekBar sb) {}
+            @Override public void onStopTrackingTouch(SeekBar sb) {}
+        });
+        card.addView(volSeek);
+
+        // 5 Ear-Rating Choices
+        TextView qLbl = new TextView(ctx);
+        qLbl.setText("How does this frequency sound on your speakers?");
+        qLbl.setTextColor(UiStyle.TEXT_PRIMARY);
+        qLbl.setTextSize(13.5f);
+        qLbl.setTypeface(null, android.graphics.Typeface.BOLD);
+        qLbl.setPadding(0, UiStyle.dp(ctx, 14), 0, UiStyle.dp(ctx, 8));
+        card.addView(qLbl);
+
+        String[] optLabels = new String[]{
+                "Way Too Quiet  →  Boost +6 dB",
+                "Slightly Quiet  →  Boost +3 dB",
+                "Balanced / Clear  →  0 dB",
+                "Slightly Loud  →  Cut -3 dB",
+                "Too Harsh / Boomy  →  Cut -6 dB"
+        };
+        float[] optVals = new float[]{6f, 3f, 0f, -3f, -6f};
+        for (int i = 0; i < optLabels.length; i++) {
+            final float dbVal = optVals[i];
+            boolean picked = Math.abs(offsetsRef[step] - dbVal) < 0.1f;
+            TextView opt = UiStyle.makePill(ctx, optLabels[i], picked, accent);
+            opt.setTextSize(13f);
+            opt.setPadding(UiStyle.dp(ctx, 12), UiStyle.dp(ctx, 11), UiStyle.dp(ctx, 12), UiStyle.dp(ctx, 11));
+            opt.setOnClickListener(v -> {
+                UiStyle.hapticTick(v, ctx);
+                offsetsRef[step] = dbVal;
+                if (step < CAL_FREQS.length - 1) {
+                    stepRef[0] = step + 1;
+                    if (ste.isPlaying()) ste.setTargetFreqHz(CAL_FREQS[step + 1]);
+                    host.onStateMutated();
+                } else {
+                    ste.stop();
+                    finalizeCalibrationPreset(ctx, store, offsetsRef, stepRef, host);
+                }
+            });
+            LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            olp.bottomMargin = UiStyle.dp(ctx, 7);
+            card.addView(opt, olp);
+        }
+
+        // Back / Restart row
+        LinearLayout navRow = new LinearLayout(ctx);
+        navRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams nLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        nLp.topMargin = UiStyle.dp(ctx, 6);
+
+        if (step > 0) {
+            TextView prev = UiStyle.makePill(ctx, "◀ Previous Band", false, accent);
+            prev.setOnClickListener(v -> {
+                stepRef[0] = step - 1;
+                if (ste.isPlaying()) ste.setTargetFreqHz(CAL_FREQS[step - 1]);
+                host.onStateMutated();
+            });
+            navRow.addView(prev);
+        }
+        navRow.addView(new View(ctx), new LinearLayout.LayoutParams(0, 1, 1f));
+
+        TextView restart = UiStyle.makePill(ctx, "↺ Restart", false, 0xFF94A3B8);
+        restart.setOnClickListener(v -> {
+            ste.stop();
+            stepRef[0] = 0;
+            for (int k = 0; k < offsetsRef.length; k++) offsetsRef[k] = 0f;
+            host.onStateMutated();
+        });
+        navRow.addView(restart);
+        card.addView(navRow, nLp);
+
+        wrap.addView(card);
+        return wrap;
+    }
+
+    private static void finalizeCalibrationPreset(Context ctx, EqStore store, float[] offsets,
+                                                  int[] stepRef, Host host) {
+        EditText et = new EditText(ctx);
+        et.setText("Calibrated Speaker");
+        et.setHint("Name your calibrated preset (e.g. My Car)");
+        et.setTextColor(UiStyle.TEXT_PRIMARY);
+        et.setHintTextColor(UiStyle.TEXT_MUTED);
+        int pad = UiStyle.dp(ctx, 16);
+        et.setPadding(pad, pad, pad, pad);
+
+        new AlertDialog.Builder(ctx)
+                .setTitle("Calibration Complete! Save Preset")
+                .setView(et)
+                .setPositiveButton("Create & Apply", (d, w) -> {
+                    String name = et.getText().toString().trim();
+                    if (name.isEmpty()) name = "Calibrated Speaker";
+                    EqStore.EqPreset p = new EqStore.EqPreset();
+                    p.id = "cal_" + UUID.randomUUID().toString().substring(0, 8);
+                    p.name = name;
+                    p.accentColor = EqStore.DEFAULT_ACCENT;
+                    p.builtIn = false;
+                    p.favorite = true;
+                    p.pinnedCar = true;
+                    p.punchMbc = 35f;
+                    p.limiter = 72f;
+                    // Log-frequency interpolate the 7 calibrated anchor points onto both 10-band and 15-band curves!
+                    for (int i = 0; i < 10; i++) {
+                        p.bands10[i] = interpolateCal(EqStore.ISO_CENTERS[i], offsets);
+                    }
+                    for (int i = 0; i < 15; i++) {
+                        p.bands15[i] = interpolateCal(EqStore.PRO15_CENTERS[i], offsets);
+                    }
+                    store.addOrUpdatePreset(p);
+                    store.setActivePreset(p.id);
+                    EqEngine.get(ctx).setAbFlatCompare(false);
+                    EqService.startOrRefresh(ctx);
+                    stepRef[0] = 0;
+                    for (int k = 0; k < offsets.length; k++) offsets[k] = 0f;
+                    Toast.makeText(ctx, "Applied calibrated preset: " + name, Toast.LENGTH_LONG).show();
+                    host.closePanel();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private static float interpolateCal(float targetHz, float[] offsets) {
+        if (targetHz <= CAL_FREQS[0]) return offsets[0];
+        if (targetHz >= CAL_FREQS[CAL_FREQS.length - 1]) return offsets[offsets.length - 1];
+        double logT = Math.log(targetHz);
+        for (int i = 0; i < CAL_FREQS.length - 1; i++) {
+            if (targetHz >= CAL_FREQS[i] && targetHz <= CAL_FREQS[i + 1]) {
+                double logA = Math.log(CAL_FREQS[i]);
+                double logB = Math.log(CAL_FREQS[i + 1]);
+                float frac = (float) ((logT - logA) / Math.max(0.0001, logB - logA));
+                return Math.round((offsets[i] + (offsets[i + 1] - offsets[i]) * frac) * 2f) / 2f;
+            }
+        }
+        return 0f;
     }
 
     private interface BoolCb { void onChange(boolean v); }

@@ -5,14 +5,15 @@ A standalone, zero-bloat Android graphic equalizer, mastering DSP deck, floating
 ## Features
 
 - **Audio DSP Engine (`DynamicsProcessing`)**
-  - Switchable **5-band / 10-band** EQ with **ISO** (`31 Hz – 16 kHz`) and **Car Sub** (`25 Hz / 45 Hz / 80 Hz...`) frequency layouts
-  - **±18 dB** gain range with **Smart Auto-Gain** and **Anti-Clipping Limiter**
+  - Switchable **5-band / 10-band / 15-band Pro** EQ with **ISO** (`31 Hz – 16 kHz`), **Car Sub** (`25/45/80 Hz...`), and **15-band 2/3-octave studio** layouts
+  - **±18 dB** gain range with **Smart Auto-Gain**, **Volume-Aware Auto-Loudness**, and **Anti-Clipping Limiter**
   - True **3-band Multiband Compressor (`Punch MBC`)** (Low / Mid / High) with automatic two-tier HAL fallback
-  - **Bass Boost** with per-preset character (**Tight**, **Deep**, **Boomy**), **Preamp**, **3D Virtualizer**, **L/R Stereo Balance**, and instant **A/B Flat** compare
+  - **Bass Boost** with per-preset character (**Tight**, **Deep**, **Boomy**), **Preamp**, **3D Virtualizer**, **L/R Stereo Balance**, **Acoustic Space Reverb** (`Studio`, `Club`, `Hall`, `Cabin`), **Mono Speaker** mode, and instant **A/B Flat** compare
   - **Dual Audio Hook Mode** (active media sessions + global output mix fallback)
 - **AMOLED Neon Green Deck & Custom Canvas Controls**
   - Electric **Neon Shocking Green (`#39FF14`)** default theme with customizable per-preset neon glow colors
-  - Switchable **Vertical Sliders** and **Draggable Smooth Spline Curve**, **Smooth Brush** swipe painting, **double-tap to zero**, **Preset Lock**, **Undo/Redo**, and smoothly animated preset transitions
+  - Switchable **Vertical Sliders** and **Draggable Smooth Spline Curve**, **Smooth Brush** swipe painting, **double-tap to zero**, **long-press 0.1 dB fine tuning**, **2D X/Y Sound Morph Pad**, **Preset Lock**, **Undo/Redo**, **Restore Factory Presets**, and smoothly animated preset transitions
+  - **Guided 7-Step Speaker & Car Calibration Wizard** that plays stepped tones and auto-builds a compensated preset
   - Live **Spectrum Bars**, **Oscilloscope Wave**, and **Stereo L/R VU Meter + Clip LED** visualizer with **bass-reactive card glow**
   - Symmetrical 2×3 **Retro Hi-Fi Rotary Knob Rack** with subtle haptic feedback
 - **Floating 3D Orb Companion**

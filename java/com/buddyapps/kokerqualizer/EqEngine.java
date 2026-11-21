@@ -7,6 +7,7 @@ import android.media.AudioManager;
 import android.media.audiofx.BassBoost;
 import android.media.audiofx.DynamicsProcessing;
 import android.media.audiofx.Equalizer;
+import android.media.audiofx.PresetReverb;
 import android.media.audiofx.Virtualizer;
 import android.media.audiofx.Visualizer;
 import android.util.Log;
@@ -31,12 +32,14 @@ public class EqEngine {
     private Equalizer fallbackEq;
     private BassBoost bassBoostFx;
     private Virtualizer virtualizerFx;
+    private PresetReverb reverbFx;
     private Visualizer visualizer;
 
     private int activeSessionId = 0;
     private int lastOpenedMediaSession = 0;
     private int visualizerSessionId = -1;
     private boolean currentSubMode = false;
+    private int currentDpBandCount = 10;
     private boolean mbcSupported = false;
     private boolean abFlatCompare = false;
     private boolean visualizerListening = false;
@@ -44,10 +47,10 @@ public class EqEngine {
     private String statusText = "Initializing...";
     private boolean engineActive = false;
 
-    // Live DSP telemetry for Headroom / Auto-Gain readout
     private float lastAutoGainDb = 0f;
     private float lastPeakBoostDb = 0f;
     private float lastMbcAmount = 0f;
+    private float lastLoudnessBoostDb = 0f;
     private float smoothBassEnergy = 0f;
 
     private VisualizerListener vizListener;
@@ -76,11 +79,8 @@ public class EqEngine {
 
     public synchronized void setVisualizerListener(VisualizerListener l) {
         this.vizListener = l;
-        if (l != null) {
-            startVisualizerIfPermitted();
-        } else {
-            stopVisualizer();
-        }
+        if (l != null) startVisualizerIfPermitted();
+        else stopVisualizer();
     }
 
     public synchronized void setAbFlatCompare(boolean flat) {
@@ -95,6 +95,7 @@ public class EqEngine {
     public synchronized float getLastAutoGainDb() { return lastAutoGainDb; }
     public synchronized float getLastPeakBoostDb() { return lastPeakBoostDb; }
     public synchronized float getLastMbcAmount() { return lastMbcAmount; }
+    public synchronized float getLastLoudnessBoostDb() { return lastLoudnessBoostDb; }
 
     public String getActiveOutputRouteLabel() {
         try {
@@ -110,12 +111,8 @@ public class EqEngine {
             }
             for (AudioDeviceInfo d : outs) {
                 int t = d.getType();
-                if (t == AudioDeviceInfo.TYPE_USB_HEADSET || t == AudioDeviceInfo.TYPE_USB_DEVICE) {
-                    return "USB-C Audio";
-                }
-                if (t == AudioDeviceInfo.TYPE_WIRED_HEADSET || t == AudioDeviceInfo.TYPE_WIRED_HEADPHONES) {
-                    return "Wired Headphones";
-                }
+                if (t == AudioDeviceInfo.TYPE_USB_HEADSET || t == AudioDeviceInfo.TYPE_USB_DEVICE) return "USB-C Audio";
+                if (t == AudioDeviceInfo.TYPE_WIRED_HEADSET || t == AudioDeviceInfo.TYPE_WIRED_HEADPHONES) return "Wired Headphones";
             }
         } catch (Throwable ignored) {}
         return "Phone Speaker";
@@ -144,13 +141,9 @@ public class EqEngine {
 
     private int chooseTargetSession() {
         EqStore.Settings s = EqStore.get(appCtx).getSettings();
-        if (s.hookMode == EqStore.HOOK_GLOBAL) {
-            return 0;
-        } else if (s.hookMode == EqStore.HOOK_SESSION) {
-            return lastOpenedMediaSession;
-        } else {
-            return lastOpenedMediaSession > 0 ? lastOpenedMediaSession : 0;
-        }
+        if (s.hookMode == EqStore.HOOK_GLOBAL) return 0;
+        if (s.hookMode == EqStore.HOOK_SESSION) return lastOpenedMediaSession;
+        return lastOpenedMediaSession > 0 ? lastOpenedMediaSession : 0;
     }
 
     public synchronized void rebuildIfNeeded(boolean force) {
@@ -159,6 +152,7 @@ public class EqEngine {
         EqStore.EqPreset p = store.getActivePreset();
         if (p == null) return;
         int targetSession = chooseTargetSession();
+        int desiredBands = (s.bandMode == EqStore.BANDS_15) ? 15 : 10;
 
         if (!s.eqEnabled) {
             releaseDsp();
@@ -174,42 +168,37 @@ public class EqEngine {
 
         if (!force && (dp != null || fallbackEq != null)
                 && activeSessionId == targetSession
-                && currentSubMode == p.carSubMode) {
+                && currentSubMode == p.carSubMode
+                && currentDpBandCount == desiredBands) {
             return;
         }
 
         releaseDsp();
         activeSessionId = targetSession;
         currentSubMode = p.carSubMode;
+        currentDpBandCount = desiredBands;
 
-        boolean dpOk = initDynamicsProcessing(targetSession, p.carSubMode);
+        boolean dpOk = initDynamicsProcessing(targetSession, p.carSubMode, desiredBands);
         if (!dpOk && targetSession != 0 && s.hookMode == EqStore.HOOK_DUAL) {
             activeSessionId = 0;
-            dpOk = initDynamicsProcessing(0, p.carSubMode);
+            dpOk = initDynamicsProcessing(0, p.carSubMode, desiredBands);
         }
 
-        if (!dpOk) {
-            initFallbackEqualizer(activeSessionId);
-        }
+        if (!dpOk) initFallbackEqualizer(activeSessionId);
 
-        try { bassBoostFx = new BassBoost(0, activeSessionId); }
-        catch (Throwable t) { bassBoostFx = null; }
+        try { bassBoostFx = new BassBoost(0, activeSessionId); } catch (Throwable t) { bassBoostFx = null; }
+        try { virtualizerFx = new Virtualizer(0, activeSessionId); } catch (Throwable t) { virtualizerFx = null; }
+        try { reverbFx = new PresetReverb(0, activeSessionId); } catch (Throwable t) { reverbFx = null; }
 
-        try { virtualizerFx = new Virtualizer(0, activeSessionId); }
-        catch (Throwable t) { virtualizerFx = null; }
-
-        if (vizListener != null) {
-            startVisualizerIfPermitted();
-        }
+        if (vizListener != null) startVisualizerIfPermitted();
     }
 
-    private boolean initDynamicsProcessing(int sessionId, boolean subMode) {
-        if (tryCreateDynamicsProcessing(sessionId, subMode, true)) {
+    private boolean initDynamicsProcessing(int sessionId, boolean subMode, int bandCount) {
+        if (tryCreateDynamicsProcessing(sessionId, subMode, bandCount, true)) {
             mbcSupported = true;
             return true;
         }
-        // Fallback tier: 10-band PreEQ + Limiter without MBC if device HAL rejects MBC on this route
-        if (tryCreateDynamicsProcessing(sessionId, subMode, false)) {
+        if (tryCreateDynamicsProcessing(sessionId, subMode, bandCount, false)) {
             mbcSupported = false;
             return true;
         }
@@ -218,28 +207,30 @@ public class EqEngine {
         return false;
     }
 
-    private boolean tryCreateDynamicsProcessing(int sessionId, boolean subMode, boolean enableMbc) {
+    private boolean tryCreateDynamicsProcessing(int sessionId, boolean subMode, int bandCount, boolean enableMbc) {
         try {
             DynamicsProcessing.Config.Builder builder = new DynamicsProcessing.Config.Builder(
                     DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
-                    2,             // stereo channels
-                    true,          // preEqInUse
-                    10,            // preEqBandCount
-                    enableMbc,     // mbcInUse (3-band Mastering Compressor)
+                    2,
+                    true,
+                    bandCount,
+                    enableMbc,
                     enableMbc ? 3 : 0,
-                    false,         // postEqInUse
-                    0,             // postEqBandCount
-                    true           // limiterInUse
+                    false,
+                    0,
+                    true
             );
             DynamicsProcessing.Config config = builder.build();
-            float[] centers = subMode ? EqStore.SUB_CENTERS : EqStore.ISO_CENTERS;
+            float[] centers = (bandCount == 15)
+                    ? EqStore.PRO15_CENTERS
+                    : (subMode ? EqStore.SUB_CENTERS : EqStore.ISO_CENTERS);
             float[] cutoffs = computeCutoffs(centers);
             float[] mbcCutoffs = new float[]{180f, 3200f, 20000f};
 
             for (int ch = 0; ch < 2; ch++) {
                 DynamicsProcessing.Eq eq = config.getPreEqByChannelIndex(ch);
                 eq.setEnabled(true);
-                for (int b = 0; b < 10; b++) {
+                for (int b = 0; b < bandCount; b++) {
                     DynamicsProcessing.EqBand band = eq.getBand(b);
                     band.setEnabled(true);
                     band.setCutoffFrequency(cutoffs[b]);
@@ -278,7 +269,7 @@ public class EqEngine {
             dp.setEnabled(true);
             return true;
         } catch (Throwable t) {
-            Log.w(TAG, "DynamicsProcessing (mbc=" + enableMbc + ") failed on session " + sessionId + ": " + t.getMessage());
+            Log.w(TAG, "DynamicsProcessing (bands=" + bandCount + ", mbc=" + enableMbc + ") failed: " + t.getMessage());
             dp = null;
             return false;
         }
@@ -302,6 +293,20 @@ public class EqEngine {
         return cutoffs;
     }
 
+    private float computeAutoLoudnessStrength() {
+        try {
+            AudioManager am = (AudioManager) appCtx.getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return 0f;
+            int max = Math.max(1, am.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
+            int cur = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+            float frac = (float) cur / max;
+            if (frac >= 0.72f) return 0f;
+            return EqStore.clamp((0.72f - frac) / 0.72f, 0f, 1f);
+        } catch (Throwable t) {
+            return 0f;
+        }
+    }
+
     public synchronized void applyCurrent() {
         EqStore store = EqStore.get(appCtx);
         EqStore.Settings s = store.getSettings();
@@ -313,6 +318,7 @@ public class EqEngine {
             lastAutoGainDb = 0f;
             lastPeakBoostDb = 0f;
             lastMbcAmount = 0f;
+            lastLoudnessBoostDb = 0f;
             updateStatus("EQ Off", false);
             return;
         }
@@ -332,70 +338,88 @@ public class EqEngine {
             applyFlatBypass();
             lastAutoGainDb = 0f;
             lastMbcAmount = 0f;
+            lastLoudnessBoostDb = 0f;
             updateStatus("A/B Flat Compare", false);
             return;
         }
 
-        // Compute effective 10-band gains including Bass Boost character & Highway Noise Boost
-        float[] effective = Arrays.copyOf(p.bands10, 10);
+        int bc = currentDpBandCount;
+        float[] effective = (bc == 15) ? Arrays.copyOf(p.bands15, 15) : Arrays.copyOf(p.bands10, 10);
+        float[] centers = (bc == 15)
+                ? EqStore.PRO15_CENTERS
+                : (p.carSubMode ? EqStore.SUB_CENTERS : EqStore.ISO_CENTERS);
+
+        // Bass Boost character shaping by real Hz frequency (works seamlessly for both 10 & 15 bands!)
         float bassFrac = p.bassBoost / 100f;
         if (bassFrac > 0.001f) {
-            if (p.bassStyle == EqStore.BASS_TIGHT) {
-                effective[0] += bassFrac * 4.0f;
-                effective[1] += bassFrac * 7.5f;
-                effective[2] += bassFrac * 4.5f;
-                effective[3] += bassFrac * 1.0f;
-            } else if (p.bassStyle == EqStore.BASS_DEEP) {
-                effective[0] += bassFrac * 9.5f;
-                effective[1] += bassFrac * 7.5f;
-                effective[2] += bassFrac * 3.5f;
-            } else { // BOOMY
-                effective[0] += bassFrac * 8.5f;
-                effective[1] += bassFrac * 10.0f;
-                effective[2] += bassFrac * 7.5f;
-                effective[3] += bassFrac * 3.5f;
+            for (int i = 0; i < bc; i++) {
+                float hz = centers[i];
+                if (p.bassStyle == EqStore.BASS_TIGHT) {
+                    if (hz <= 45f) effective[i] += bassFrac * 4.0f;
+                    else if (hz <= 90f) effective[i] += bassFrac * 7.5f;
+                    else if (hz <= 170f) effective[i] += bassFrac * 4.0f;
+                } else if (p.bassStyle == EqStore.BASS_DEEP) {
+                    if (hz <= 45f) effective[i] += bassFrac * 9.5f;
+                    else if (hz <= 90f) effective[i] += bassFrac * 7.5f;
+                    else if (hz <= 150f) effective[i] += bassFrac * 3.5f;
+                } else { // BOOMY
+                    if (hz <= 45f) effective[i] += bassFrac * 8.5f;
+                    else if (hz <= 100f) effective[i] += bassFrac * 10.0f;
+                    else if (hz <= 180f) effective[i] += bassFrac * 7.0f;
+                    else if (hz <= 280f) effective[i] += bassFrac * 3.0f;
+                }
             }
         }
 
-        // Highway Road-Noise Compensation (+3.5 dB lows, +2.5 dB vocal presence, +2 dB air)
+        // Volume-Aware Auto-Loudness (Fletcher-Munson contour: fuller bass & sparkle at low volume)
+        float loudStrength = s.autoLoudness ? computeAutoLoudnessStrength() : 0f;
+        lastLoudnessBoostDb = loudStrength * 5.5f;
+        if (loudStrength > 0.02f) {
+            for (int i = 0; i < bc; i++) {
+                float hz = centers[i];
+                if (hz <= 70f) effective[i] += loudStrength * 5.5f;
+                else if (hz <= 140f) effective[i] += loudStrength * 3.2f;
+                else if (hz >= 8000f) effective[i] += loudStrength * 3.2f;
+                else if (hz >= 4000f) effective[i] += loudStrength * 1.6f;
+            }
+        }
+
+        // Highway Road-Noise Compensation
         if (s.highwayBoost) {
-            effective[0] += 3.5f;
-            effective[1] += 3.0f;
-            effective[2] += 1.5f;
-            effective[5] += 2.0f;
-            effective[6] += 2.5f;
-            effective[7] += 2.0f;
-            effective[8] += 1.5f;
+            for (int i = 0; i < bc; i++) {
+                float hz = centers[i];
+                if (hz <= 90f) effective[i] += 3.5f;
+                else if (hz <= 180f) effective[i] += 1.5f;
+                else if (hz >= 1000f && hz <= 4500f) effective[i] += 2.4f;
+                else if (hz >= 6000f && hz <= 12000f) effective[i] += 1.5f;
+            }
         }
 
         float maxPeak = 0f;
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < bc; i++) {
             effective[i] = EqStore.clamp(effective[i], -EqStore.MAX_GAIN_DB, EqStore.MAX_GAIN_DB);
             if (effective[i] > maxPeak) maxPeak = effective[i];
         }
         lastPeakBoostDb = maxPeak;
 
-        // Smart Auto-Gain prevents volume jump & digital clipping when boosting heavily
         float autoCompDb = 0f;
         if (s.autoGain && maxPeak > 1.5f) {
             autoCompDb = -Math.min(12.0f, (maxPeak - 1.5f) * 0.55f);
         }
         lastAutoGainDb = autoCompDb;
 
-        // Stereo L/R Balance attenuation (-100 = full Left, +100 = full Right)
+        // Stereo L/R Balance (centered cleanly when Mono Speaker mode is active)
         float leftBalDb = 0f;
         float rightBalDb = 0f;
-        if (p.balance > 1f) {
-            leftBalDb = -(p.balance / 100f) * 24f;
-        } else if (p.balance < -1f) {
-            rightBalDb = -(-p.balance / 100f) * 24f;
+        if (!s.monoAudio) {
+            if (p.balance > 1f) leftBalDb = -(p.balance / 100f) * 24f;
+            else if (p.balance < -1f) rightBalDb = -(-p.balance / 100f) * 24f;
         }
 
         float hwyPre = s.highwayBoost ? 1.5f : 0f;
         float baseGainL = EqStore.clamp(p.preampDb + hwyPre + autoCompDb + leftBalDb, -30f, 15f);
         float baseGainR = EqStore.clamp(p.preampDb + hwyPre + autoCompDb + rightBalDb, -30f, 15f);
 
-        // Effective Multiband Compressor amount (boosted slightly in Highway Mode)
         float mbcAmt = EqStore.clamp(p.punchMbc + (s.highwayBoost ? 18f : 0f), 0f, 100f);
         lastMbcAmount = mbcAmt;
 
@@ -415,14 +439,13 @@ public class EqEngine {
                 float release = 110f - limFrac * 70f;
 
                 for (int ch = 0; ch < 2; ch++) {
-                    for (int b = 0; b < 10; b++) {
+                    for (int b = 0; b < bc; b++) {
                         DynamicsProcessing.EqBand band = dp.getPreEqBandByChannelIndex(ch, b);
                         band.setEnabled(true);
                         band.setGain(effective[b]);
                         dp.setPreEqBandByChannelIndex(ch, b, band);
                     }
 
-                    // 3-Band Mastering Compressor (only if HAL supports MBC on this route)
                     if (mbcSupported) {
                         for (int m = 0; m < 3; m++) {
                             DynamicsProcessing.MbcBand mb = dp.getMbcBandByChannelIndex(ch, m);
@@ -465,7 +488,7 @@ public class EqEngine {
                 short numBands = fallbackEq.getNumberOfBands();
                 short[] range = fallbackEq.getBandLevelRange();
                 for (short b = 0; b < numBands; b++) {
-                    int idx = Math.min(9, (b * 10) / Math.max(1, numBands));
+                    int idx = Math.min(bc - 1, (b * bc) / Math.max(1, numBands));
                     int mb = (int) (effective[idx] * 100f);
                     short level = (short) Math.max(range[0], Math.min(range[1], mb));
                     fallbackEq.setBandLevel(b, level);
@@ -489,7 +512,8 @@ public class EqEngine {
 
         if (virtualizerFx != null) {
             try {
-                boolean useVirt = p.virtualizer > 2f;
+                // Disable stereo widening in Mono Speaker mode for clean phase coherence
+                boolean useVirt = !s.monoAudio && p.virtualizer > 2f;
                 virtualizerFx.setEnabled(useVirt);
                 if (useVirt) {
                     short strength = (short) Math.min(1000, Math.round(p.virtualizer * 10f));
@@ -498,10 +522,26 @@ public class EqEngine {
             } catch (Throwable ignored) {}
         }
 
-        String modeTag = activeSessionId > 0 ? ("Session #" + activeSessionId) : "Global";
-        String engineTag = (dp != null) ? (mbcSupported ? "DSP+MBC" : "DSP") : "EQ";
-        String hwyTag = s.highwayBoost ? " • HWY" : "";
-        updateStatus(engineTag + " • " + modeTag + hwyTag, true);
+        if (reverbFx != null) {
+            try {
+                boolean useRev = p.reverbMode != EqStore.REVERB_OFF;
+                reverbFx.setEnabled(useRev);
+                if (useRev) {
+                    short preset = PresetReverb.PRESET_NONE;
+                    if (p.reverbMode == EqStore.REVERB_STUDIO) preset = PresetReverb.PRESET_SMALLROOM;
+                    else if (p.reverbMode == EqStore.REVERB_CLUB) preset = PresetReverb.PRESET_MEDIUMHALL;
+                    else if (p.reverbMode == EqStore.REVERB_HALL) preset = PresetReverb.PRESET_LARGEHALL;
+                    else if (p.reverbMode == EqStore.REVERB_CAR) preset = PresetReverb.PRESET_MEDIUMROOM;
+                    reverbFx.setPreset(preset);
+                }
+            } catch (Throwable ignored) {}
+        }
+
+        String modeTag = activeSessionId > 0 ? ("S#" + activeSessionId) : "Global";
+        String bandTag = (bc == 15) ? "15B" : "10B";
+        String engineTag = (dp != null) ? (mbcSupported ? (bandTag + "+MBC") : bandTag) : "EQ";
+        String extraTag = s.highwayBoost ? " • HWY" : (s.monoAudio ? " • MONO" : "");
+        updateStatus(engineTag + " • " + modeTag + extraTag, true);
     }
 
     private void applyFlatBypass() {
@@ -510,7 +550,7 @@ public class EqEngine {
                 dp.setInputGainbyChannel(0, 0f);
                 dp.setInputGainbyChannel(1, 0f);
                 for (int ch = 0; ch < 2; ch++) {
-                    for (int b = 0; b < 10; b++) {
+                    for (int b = 0; b < currentDpBandCount; b++) {
                         DynamicsProcessing.EqBand band = dp.getPreEqBandByChannelIndex(ch, b);
                         band.setGain(0f);
                         dp.setPreEqBandByChannelIndex(ch, b, band);
@@ -525,15 +565,10 @@ public class EqEngine {
                 }
             } catch (Throwable ignored) {}
         }
-        if (fallbackEq != null) {
-            try { fallbackEq.setEnabled(false); } catch (Throwable ignored) {}
-        }
-        if (bassBoostFx != null) {
-            try { bassBoostFx.setEnabled(false); } catch (Throwable ignored) {}
-        }
-        if (virtualizerFx != null) {
-            try { virtualizerFx.setEnabled(false); } catch (Throwable ignored) {}
-        }
+        if (fallbackEq != null) try { fallbackEq.setEnabled(false); } catch (Throwable ignored) {}
+        if (bassBoostFx != null) try { bassBoostFx.setEnabled(false); } catch (Throwable ignored) {}
+        if (virtualizerFx != null) try { virtualizerFx.setEnabled(false); } catch (Throwable ignored) {}
+        if (reverbFx != null) try { reverbFx.setEnabled(false); } catch (Throwable ignored) {}
     }
 
     public synchronized void startVisualizerIfPermitted() {
@@ -574,10 +609,7 @@ public class EqEngine {
         if (raw == null || raw.length == 0) return;
         int n = waveBuf.length;
         float step = (float) raw.length / n;
-        float peakL = 0f;
-        float peakR = 0f;
-        float sumSqL = 0f;
-        float sumSqR = 0f;
+        float peakL = 0f, peakR = 0f, sumSqL = 0f, sumSqR = 0f;
         int cnt = 0;
 
         for (int i = 0; i < n; i++) {
@@ -585,21 +617,17 @@ public class EqEngine {
             float s = ((raw[idx] & 0xFF) - 128) / 128f;
             waveBuf[i] = s;
             float a = Math.abs(s);
-            if ((i & 1) == 0) {
-                sumSqL += s * s;
-                if (a > peakL) peakL = a;
-            } else {
-                sumSqR += s * s;
-                if (a > peakR) peakR = a;
-            }
+            if ((i & 1) == 0) { sumSqL += s * s; if (a > peakL) peakL = a; }
+            else { sumSqR += s * s; if (a > peakR) peakR = a; }
             cnt++;
         }
 
         float rmsL = (float) Math.sqrt(sumSqL / Math.max(1, cnt / 2));
         float rmsR = (float) Math.sqrt(sumSqR / Math.max(1, cnt / 2));
 
+        EqStore.Settings st = EqStore.get(appCtx).getSettings();
         EqStore.EqPreset p = EqStore.get(appCtx).getActivePreset();
-        float bal = p != null ? p.balance / 100f : 0f;
+        float bal = (p != null && !st.monoAudio) ? p.balance / 100f : 0f;
         float scaleL = bal > 0f ? (1f - bal * 0.85f) : 1f;
         float scaleR = bal < 0f ? (1f + bal * 0.85f) : 1f;
 
@@ -611,9 +639,7 @@ public class EqEngine {
 
         boolean clipping = peakL > 0.94f || peakR > 0.94f;
         VisualizerListener l = vizListener;
-        if (l != null) {
-            l.onAudioData(smoothBars, waveBuf, smoothVuL, smoothVuR, clipping, smoothBassEnergy);
-        }
+        if (l != null) l.onAudioData(smoothBars, waveBuf, smoothVuL, smoothVuR, clipping, smoothBassEnergy);
     }
 
     private void processFft(byte[] fft) {
@@ -635,11 +661,7 @@ public class EqEngine {
             }
             float db = (float) (20.0 * Math.log10(maxMag + 1.0));
             float norm = EqStore.clamp((db - 2f) / 36f, 0f, 1f);
-            if (norm > smoothBars[i]) {
-                smoothBars[i] = smoothBars[i] * 0.35f + norm * 0.65f;
-            } else {
-                smoothBars[i] = smoothBars[i] * 0.78f + norm * 0.22f;
-            }
+            smoothBars[i] = norm > smoothBars[i] ? (smoothBars[i] * 0.35f + norm * 0.65f) : (smoothBars[i] * 0.78f + norm * 0.22f);
             if (i < 5) bassSum += smoothBars[i];
         }
         float rawBass = bassSum / 5f;
@@ -648,9 +670,7 @@ public class EqEngine {
                 : smoothBassEnergy * 0.82f + rawBass * 0.18f;
 
         VisualizerListener l = vizListener;
-        if (l != null) {
-            l.onAudioData(smoothBars, waveBuf, smoothVuL, smoothVuR, smoothVuL > 0.95f || smoothVuR > 0.95f, smoothBassEnergy);
-        }
+        if (l != null) l.onAudioData(smoothBars, waveBuf, smoothVuL, smoothVuR, smoothVuL > 0.95f || smoothVuR > 0.95f, smoothBassEnergy);
     }
 
     public synchronized void stopVisualizer() {
@@ -664,34 +684,17 @@ public class EqEngine {
     }
 
     public synchronized void releaseDsp() {
-        if (dp != null) {
-            try { dp.setEnabled(false); } catch (Throwable ignored) {}
-            try { dp.release(); } catch (Throwable ignored) {}
-            dp = null;
-        }
-        if (fallbackEq != null) {
-            try { fallbackEq.setEnabled(false); } catch (Throwable ignored) {}
-            try { fallbackEq.release(); } catch (Throwable ignored) {}
-            fallbackEq = null;
-        }
-        if (bassBoostFx != null) {
-            try { bassBoostFx.setEnabled(false); } catch (Throwable ignored) {}
-            try { bassBoostFx.release(); } catch (Throwable ignored) {}
-            bassBoostFx = null;
-        }
-        if (virtualizerFx != null) {
-            try { virtualizerFx.setEnabled(false); } catch (Throwable ignored) {}
-            try { virtualizerFx.release(); } catch (Throwable ignored) {}
-            virtualizerFx = null;
-        }
+        if (dp != null) { try { dp.setEnabled(false); } catch (Throwable ignored) {} try { dp.release(); } catch (Throwable ignored) {} dp = null; }
+        if (fallbackEq != null) { try { fallbackEq.setEnabled(false); } catch (Throwable ignored) {} try { fallbackEq.release(); } catch (Throwable ignored) {} fallbackEq = null; }
+        if (bassBoostFx != null) { try { bassBoostFx.setEnabled(false); } catch (Throwable ignored) {} try { bassBoostFx.release(); } catch (Throwable ignored) {} bassBoostFx = null; }
+        if (virtualizerFx != null) { try { virtualizerFx.setEnabled(false); } catch (Throwable ignored) {} try { virtualizerFx.release(); } catch (Throwable ignored) {} virtualizerFx = null; }
+        if (reverbFx != null) { try { reverbFx.setEnabled(false); } catch (Throwable ignored) {} try { reverbFx.release(); } catch (Throwable ignored) {} reverbFx = null; }
     }
 
     private void updateStatus(String text, boolean active) {
         this.statusText = text;
         this.engineActive = active;
         StatusListener l = statusListener;
-        if (l != null) {
-            l.onStatusChanged(text, active);
-        }
+        if (l != null) l.onStatusChanged(text, active);
     }
 }

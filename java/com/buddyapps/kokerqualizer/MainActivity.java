@@ -2,6 +2,7 @@ package com.buddyapps.kokerqualizer;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -14,12 +15,14 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
 import android.widget.HorizontalScrollView;
@@ -54,6 +57,10 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
     private static final int PANEL_SETTINGS = 4;
     private static final int PANEL_HEALTH = 5;
     private static final int PANEL_YOUTUBE = 6;
+    private static final int PANEL_CALIBRATE = 7;
+
+    private final int[] calStepRef = new int[]{0};
+    private final float[] calOffsetsRef = new float[7];
 
     private EqStore store;
     private YouTubeStore ytStore;
@@ -110,13 +117,17 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
     private HorizontalScrollView presetChipScroll;
     private LinearLayout presetChipRow;
 
-    private TextView btnBandCount, btnFreqLayout, btnViewMode, btnBrush, btnHwy, btnLock, btnUndo, btnRedo, btnReset;
+    private TextView btnBandCount, btnFreqLayout, btnViewMode, btnBrush, btnMorph, btnHwy, btnLock, btnUndo, btnRedo, btnReset;
     private EqDeckView eqDeckView;
+    private LinearLayout morphCard;
+    private SoundMorphPadView morphPadView;
+    private EqStore.EqPreset morphBaseSnapshot;
 
     // Symmetrical 2x3 Hi-Fi Retro Rotary Knob Rack (6 Knobs!)
     private RotaryKnobView knobBass, knobPunch, knobPreamp, knobLimiter, knobVirt, knobBalance;
     private TextView[] bassStyleBtns = new TextView[3];
-    private TextView autoGainPill;
+    private TextView[] reverbBtns = new TextView[5];
+    private TextView autoGainPill, loudnessPill, monoPill;
 
     private TextView thumbPower, thumbAb, thumbPreset, thumbCar;
 
@@ -324,6 +335,7 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         body.addView(buildActivePresetBanner());
         body.addView(buildPresetStrip());
         body.addView(buildEqCard());
+        body.addView(buildMorphPadCard());
         body.addView(buildKnobRackCard());
 
         scroll.addView(body);
@@ -709,8 +721,11 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         int gap = UiStyle.dp(this, 6);
 
         btnBandCount = addToolbarPill(tools, "10-Band", gap, v -> {
-            store.getSettings().tenBandMode = !store.getSettings().tenBandMode;
+            EqStore.Settings s = store.getSettings();
+            s.bandMode = (s.bandMode + 1) % 3; // 5B -> 10B -> 15B Pro
             store.save();
+            engine.rebuildIfNeeded(true);
+            EqService.startOrRefresh(this);
             refreshAllUi(false);
         });
         btnFreqLayout = addToolbarPill(tools, "ISO", gap, v -> {
@@ -731,6 +746,13 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         btnBrush = addToolbarPill(tools, "Brush", gap, v -> {
             store.getSettings().brushMode = !store.getSettings().brushMode;
             store.save();
+            refreshAllUi(false);
+        });
+        btnMorph = addToolbarPill(tools, "✨ Morph", gap, v -> {
+            store.getSettings().morphPadVisible = !store.getSettings().morphPadVisible;
+            store.save();
+            morphBaseSnapshot = null;
+            if (morphPadView != null) morphPadView.setCoords(0f, 0f);
             refreshAllUi(false);
         });
         btnHwy = addToolbarPill(tools, "🛣 HWY", gap, v -> {
@@ -755,6 +777,7 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
             if (p == null) return;
             pushUndo(p);
             Arrays.fill(p.bands10, 0f);
+            Arrays.fill(p.bands15, 0f);
             store.addOrUpdatePreset(p);
             EqService.startOrRefresh(this);
             refreshAllUi(true);
@@ -772,10 +795,19 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
                 if (dragStartSnapshot == null) {
                     dragStartSnapshot = p.copy(p.id, p.name, p.builtIn);
                 }
-                if (store.getSettings().tenBandMode) {
-                    p.bands10[bandIndex] = gainDb;
+                int bm = store.getSettings().bandMode;
+                if (bm == EqStore.BANDS_15) {
+                    if (bandIndex >= 0 && bandIndex < 15) {
+                        p.bands15[bandIndex] = gainDb;
+                        p.bands10 = EqStore.resample15To10(p.bands15);
+                    }
+                } else if (bm == EqStore.BANDS_10) {
+                    if (bandIndex >= 0 && bandIndex < 10) {
+                        p.bands10[bandIndex] = gainDb;
+                        p.bands15 = EqStore.resample10To15(p.bands10);
+                    }
                 } else {
-                    EqStore.apply5BandChange(p.bands10, bandIndex, gainDb);
+                    EqStore.apply5BandChange(p, bandIndex, gainDb);
                 }
                 engine.applyCurrent();
                 updateTelemetryStrip();
@@ -799,6 +831,12 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
             }
 
             @Override
+            public void onBandLongPress(int bandIndex, String freqLabel, float currentDb) {
+                dragStartSnapshot = null;
+                showPrecisionFineTuneDialog(bandIndex, freqLabel, currentDb);
+            }
+
+            @Override
             public void onLockedTouch() {
                 showLockedToast();
             }
@@ -809,7 +847,7 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         eqCard.addView(eqDeckView, eqLp);
 
         TextView hint = new TextView(this);
-        hint.setText("±18 dB  •  Double-tap any band to zero  •  Tap status pill for Health Check");
+        hint.setText("±18 dB  •  Double-tap to zero  •  Long-press any band for 0.1 dB fine tune");
         hint.setTextColor(UiStyle.TEXT_MUTED);
         hint.setTextSize(10.5f);
         hint.setGravity(Gravity.CENTER);
@@ -823,6 +861,91 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         return eqCard;
     }
 
+    private View buildMorphPadCard() {
+        morphCard = new LinearLayout(this);
+        morphCard.setOrientation(LinearLayout.VERTICAL);
+        morphCard.setBackground(UiStyle.roundRect(UiStyle.SURFACE_CARD, UiStyle.BORDER_SUBTLE, UiStyle.dp(this, 1), UiStyle.dp(this, 22)));
+        morphCard.setPadding(UiStyle.dp(this, 12), UiStyle.dp(this, 10), UiStyle.dp(this, 12), UiStyle.dp(this, 10));
+
+        LinearLayout hdr = new LinearLayout(this);
+        hdr.setOrientation(LinearLayout.HORIZONTAL);
+        hdr.setGravity(Gravity.CENTER_VERTICAL);
+        TextView lbl = new TextView(this);
+        lbl.setText("✨ 2D X/Y SOUND MORPH PAD  (double-tap to center)");
+        lbl.setTextColor(UiStyle.TEXT_MUTED);
+        lbl.setTextSize(10.5f);
+        lbl.setTypeface(null, android.graphics.Typeface.BOLD);
+        hdr.addView(lbl, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        morphCard.addView(hdr);
+
+        morphPadView = new SoundMorphPadView(this);
+        morphPadView.setListener(new SoundMorphPadView.Listener() {
+            @Override
+            public void onMorphChanging(float xNorm, float yNorm) {
+                EqStore.EqPreset p = store.getActivePreset();
+                if (p == null) return;
+                if (morphBaseSnapshot == null) {
+                    morphBaseSnapshot = p.copy(p.id, p.name, p.builtIn);
+                    dragStartSnapshot = morphBaseSnapshot.copy(p.id, p.name, p.builtIn);
+                }
+                // Apply smooth 2D sound sculpt over base snapshot:
+                // yNorm < 0 => Deep Sub boost; yNorm > 0 => Crystal Vocal presence
+                // xNorm < 0 => Warm Analog rolloff; xNorm > 0 => Punchy Bright & MBC punch
+                for (int i = 0; i < 10; i++) {
+                    float f = i / 9f; // 0 = sub, 1 = air
+                    float subDelta = (-yNorm) * (1f - f) * 6.5f;
+                    float vocDelta = (yNorm) * (float) Math.sin(f * Math.PI) * 5.0f;
+                    float tiltDelta = xNorm * (f - 0.45f) * 6.5f;
+                    p.bands10[i] = EqStore.clamp(
+                            Math.round((morphBaseSnapshot.bands10[i] + subDelta + vocDelta + tiltDelta) * 2f) / 2f,
+                            -EqStore.MAX_GAIN_DB, EqStore.MAX_GAIN_DB);
+                }
+                p.bands15 = EqStore.resample10To15(p.bands10);
+                p.bassBoost = EqStore.clamp(morphBaseSnapshot.bassBoost + (-yNorm) * 25f, 0f, 100f);
+                p.punchMbc = EqStore.clamp(morphBaseSnapshot.punchMbc + xNorm * 22f, 0f, 100f);
+
+                engine.applyCurrent();
+                EqStore.Settings s = store.getSettings();
+                boolean act = s.eqEnabled && !engine.isAbFlatCompare();
+                eqDeckView.setState(p.bands10, p.bands15, s.bandMode, p.carSubMode, s.curveViewMode,
+                        s.brushMode, s.presetLocked, act, p.accentColor, false);
+                knobBass.setValue(p.bassBoost, false);
+                knobPunch.setValue(p.punchMbc, false);
+                updateTelemetryStrip();
+            }
+
+            @Override
+            public void onMorphFinished(float xNorm, float yNorm) {
+                if (dragStartSnapshot != null) {
+                    undoStack.push(dragStartSnapshot);
+                    if (undoStack.size() > 30) undoStack.removeLast();
+                    redoStack.clear();
+                    dragStartSnapshot = null;
+                }
+                EqStore.EqPreset p = store.getActivePreset();
+                if (p != null) {
+                    store.addOrUpdatePreset(p);
+                    EqService.startOrRefresh(MainActivity.this);
+                }
+                refreshUndoRedoPills();
+                updateTelemetryStrip();
+            }
+
+            @Override
+            public void onLockedTouch() { showLockedToast(); }
+        });
+        LinearLayout.LayoutParams mpLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, UiStyle.dp(this, 168));
+        mpLp.topMargin = UiStyle.dp(this, 6);
+        morphCard.addView(morphPadView, mpLp);
+
+        LinearLayout.LayoutParams mcLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        mcLp.bottomMargin = UiStyle.dp(this, 12);
+        morphCard.setLayoutParams(mcLp);
+        return morphCard;
+    }
+
     private View buildKnobRackCard() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -834,14 +957,42 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         topRow.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView rackTitle = new TextView(this);
-        rackTitle.setText("HI-FI MASTERING KNOB RACK");
+        rackTitle.setText("MASTERING RACK");
         rackTitle.setTextColor(UiStyle.TEXT_MUTED);
-        rackTitle.setTextSize(11.5f);
+        rackTitle.setTextSize(11f);
         rackTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         topRow.addView(rackTitle, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-        autoGainPill = UiStyle.makePill(this, "Auto-Gain", true, 0xFF39FF14);
-        autoGainPill.setTextSize(10.5f);
+        loudnessPill = UiStyle.makePill(this, "Loudness", false, EqStore.DEFAULT_ACCENT);
+        loudnessPill.setTextSize(10f);
+        loudnessPill.setPadding(UiStyle.dp(this, 8), UiStyle.dp(this, 4), UiStyle.dp(this, 8), UiStyle.dp(this, 4));
+        loudnessPill.setOnClickListener(v -> {
+            UiStyle.hapticTick(v, this);
+            store.getSettings().autoLoudness = !store.getSettings().autoLoudness;
+            store.save();
+            engine.applyCurrent();
+            refreshAllUi(false);
+        });
+        LinearLayout.LayoutParams pGap = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        pGap.rightMargin = UiStyle.dp(this, 5);
+        topRow.addView(loudnessPill, pGap);
+
+        monoPill = UiStyle.makePill(this, "Mono", false, EqStore.DEFAULT_ACCENT);
+        monoPill.setTextSize(10f);
+        monoPill.setPadding(UiStyle.dp(this, 8), UiStyle.dp(this, 4), UiStyle.dp(this, 8), UiStyle.dp(this, 4));
+        monoPill.setOnClickListener(v -> {
+            UiStyle.hapticTick(v, this);
+            store.getSettings().monoAudio = !store.getSettings().monoAudio;
+            store.save();
+            engine.applyCurrent();
+            refreshAllUi(false);
+        });
+        topRow.addView(monoPill, pGap);
+
+        autoGainPill = UiStyle.makePill(this, "Auto-Gain", true, EqStore.DEFAULT_ACCENT);
+        autoGainPill.setTextSize(10f);
+        autoGainPill.setPadding(UiStyle.dp(this, 8), UiStyle.dp(this, 4), UiStyle.dp(this, 8), UiStyle.dp(this, 4));
         autoGainPill.setOnClickListener(v -> {
             UiStyle.hapticTick(v, this);
             store.getSettings().autoGain = !store.getSettings().autoGain;
@@ -890,6 +1041,46 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
             bassRow.addView(bassStyleBtns[i], lp);
         }
         card.addView(bassRow, brLp);
+
+        // Acoustic Space Reverb Row (saved per preset!)
+        LinearLayout revRow = new LinearLayout(this);
+        revRow.setOrientation(LinearLayout.HORIZONTAL);
+        revRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams rrLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rrLp.bottomMargin = UiStyle.dp(this, 8);
+
+        TextView rLbl = new TextView(this);
+        rLbl.setText("Space:");
+        rLbl.setTextColor(UiStyle.TEXT_SECONDARY);
+        rLbl.setTextSize(11.5f);
+        LinearLayout.LayoutParams rlLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rlLp.rightMargin = UiStyle.dp(this, 6);
+        revRow.addView(rLbl, rlLp);
+
+        String[] revLabels = new String[]{"Off", "Studio", "Club", "Hall", "Cabin"};
+        for (int i = 0; i < 5; i++) {
+            final int rm = i;
+            reverbBtns[i] = UiStyle.makePill(this, revLabels[i], i == 0, EqStore.DEFAULT_ACCENT);
+            reverbBtns[i].setTextSize(10f);
+            reverbBtns[i].setPadding(UiStyle.dp(this, 6), UiStyle.dp(this, 4), UiStyle.dp(this, 6), UiStyle.dp(this, 4));
+            reverbBtns[i].setOnClickListener(v -> {
+                if (store.getSettings().presetLocked) { showLockedToast(); return; }
+                UiStyle.hapticTick(v, this);
+                EqStore.EqPreset p = store.getActivePreset();
+                if (p == null) return;
+                pushUndo(p);
+                p.reverbMode = rm;
+                store.addOrUpdatePreset(p);
+                EqService.startOrRefresh(this);
+                refreshAllUi(false);
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (i < 4) lp.rightMargin = UiStyle.dp(this, 4);
+            revRow.addView(reverbBtns[i], lp);
+        }
+        card.addView(revRow, rrLp);
 
         // Symmetrical 2x3 Hi-Fi Knob Grid (6 Big Knobs!)
         GridLayout grid = new GridLayout(this);
@@ -1102,14 +1293,23 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         drawerSheet.addView(brand);
 
         TextView sub = new TextView(this);
-        sub.setText("v1.5.5 • Neon Green 3D Orb + DSP");
+        sub.setText("v1.6 • Pro 15-Band DSP + Morph Pad");
         sub.setTextColor(UiStyle.TEXT_MUTED);
         sub.setTextSize(12f);
-        sub.setPadding(0, UiStyle.dp(this, 2), 0, UiStyle.dp(this, 20));
+        sub.setPadding(0, UiStyle.dp(this, 2), 0, UiStyle.dp(this, 18));
         drawerSheet.addView(sub);
 
         addDrawerItem("🎛  Main Equalizer Deck", () -> { closeDrawer(); closePanel(); });
-        addDrawerItem("🫧  Toggle Floating Bubble", () -> { closeDrawer(); toggleFloatingBubble(); });
+        addDrawerItem("🫧  Toggle Floating 3D Orb", () -> { closeDrawer(); toggleFloatingBubble(); });
+        addDrawerItem("✨  Toggle 2D Sound Morph Pad", () -> {
+            closeDrawer();
+            closePanel();
+            store.getSettings().morphPadVisible = !store.getSettings().morphPadVisible;
+            store.save();
+            morphBaseSnapshot = null;
+            refreshAllUi(false);
+        });
+        addDrawerItem("🎯  Speaker Calibration Wizard", () -> { closeDrawer(); openPanel(PANEL_CALIBRATE); });
         addDrawerItem("🎵  YouTube Playlists (In-App)", () -> { closeDrawer(); openPanel(PANEL_YOUTUBE); });
         addDrawerItem("⭐  Preset Library & Backup", () -> { closeDrawer(); openPanel(PANEL_PRESETS); });
         addDrawerItem("📡  Bluetooth & Wired Auto-Switch", () -> { closeDrawer(); openPanel(PANEL_BT); });
@@ -1187,6 +1387,9 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         } else if (openSubPanel == PANEL_YOUTUBE) {
             subPanelTitle.setText("YouTube Playlists");
             subPanelScroll.addView(DrawerPanels.buildYouTubePanel(this, this, ytFilterRef));
+        } else if (openSubPanel == PANEL_CALIBRATE) {
+            subPanelTitle.setText("Speaker Calibration");
+            subPanelScroll.addView(DrawerPanels.buildCalibrationPanel(this, this, calStepRef, calOffsetsRef));
         } else if (openSubPanel == PANEL_SETTINGS) {
             subPanelTitle.setText("Settings");
             subPanelScroll.addView(DrawerPanels.buildSettingsPanel(this, this));
@@ -1219,10 +1422,12 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         String route = engine.getActiveOutputRouteLabel();
         float ag = engine.getLastAutoGainDb();
         float mbc = engine.getLastMbcAmount();
-        String agStr = s.autoGain ? String.format(Locale.US, "Auto-Gain %+.1fdB", ag) : "Auto-Gain OFF";
+        String agStr = s.autoGain ? String.format(Locale.US, "AG %+.1fdB", ag) : "AG OFF";
         String mbcStr = mbc > 2f ? String.format(Locale.US, "MBC %d%%", Math.round(mbc)) : "MBC OFF";
+        float loud = engine.getLastLoudnessBoostDb();
+        String loudStr = (s.autoLoudness && loud > 0.2f) ? String.format(Locale.US, " • Loud +%.1fdB", loud) : "";
         String headroom = (engine.getLastPeakBoostDb() > 14f && !s.autoGain) ? "Hot" : "Safe";
-        telemetryTv.setText(route + "  •  " + agStr + "  •  " + mbcStr + "  •  Headroom: " + headroom);
+        telemetryTv.setText(route + " • " + agStr + " • " + mbcStr + loudStr + " • " + headroom);
     }
 
     private void refreshAllUi(boolean animate) {
@@ -1272,6 +1477,8 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
                 UiStyle.hapticTick(v, this);
                 undoStack.clear();
                 redoStack.clear();
+                morphBaseSnapshot = null;
+                if (morphPadView != null) morphPadView.setCoords(0f, 0f);
                 store.setActivePreset(item.id);
                 engine.setAbFlatCompare(false);
                 EqService.startOrRefresh(this);
@@ -1290,9 +1497,11 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
             });
         }
 
-        btnBandCount.setText(s.tenBandMode ? "10-Band" : "5-Band");
-        UiStyle.stylePill(this, btnBandCount, s.tenBandMode, accent);
+        String bmLbl = s.bandMode == EqStore.BANDS_15 ? "15B Pro" : (s.bandMode == EqStore.BANDS_10 ? "10-Band" : "5-Band");
+        btnBandCount.setText(bmLbl);
+        UiStyle.stylePill(this, btnBandCount, s.bandMode >= EqStore.BANDS_10, accent);
 
+        btnFreqLayout.setVisibility(s.bandMode == EqStore.BANDS_15 ? View.GONE : View.VISIBLE);
         btnFreqLayout.setText(p.carSubMode ? "Car Sub" : "ISO");
         UiStyle.stylePill(this, btnFreqLayout, p.carSubMode, accent);
 
@@ -1301,6 +1510,13 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
 
         btnBrush.setText(s.brushMode ? "Brush ON" : "Brush");
         UiStyle.stylePill(this, btnBrush, s.brushMode, accent);
+
+        btnMorph.setText(s.morphPadVisible ? "✨ Morph ON" : "✨ Morph");
+        UiStyle.stylePill(this, btnMorph, s.morphPadVisible, accent);
+        if (morphCard != null) {
+            morphCard.setVisibility(s.morphPadVisible ? View.VISIBLE : View.GONE);
+            morphPadView.setStyle(accent, active, s.presetLocked);
+        }
 
         btnHwy.setText(s.highwayBoost ? "🛣 HWY ON" : "🛣 HWY");
         UiStyle.stylePill(this, btnHwy, s.highwayBoost, 0xFF00E676);
@@ -1311,12 +1527,17 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         refreshUndoRedoPills();
         UiStyle.stylePill(this, btnReset, false, accent);
 
-        eqDeckView.setState(p.bands10, s.tenBandMode, p.carSubMode, s.curveViewMode,
+        eqDeckView.setState(p.bands10, p.bands15, s.bandMode, p.carSubMode, s.curveViewMode,
                 s.brushMode, s.presetLocked, active, accent, animate);
 
+        UiStyle.stylePill(this, loudnessPill, s.autoLoudness, accent);
+        UiStyle.stylePill(this, monoPill, s.monoAudio, 0xFFFFB300);
         UiStyle.stylePill(this, autoGainPill, s.autoGain, accent);
         for (int i = 0; i < 3; i++) {
             UiStyle.stylePill(this, bassStyleBtns[i], p.bassStyle == i, accent);
+        }
+        for (int i = 0; i < 5; i++) {
+            UiStyle.stylePill(this, reverbBtns[i], p.reverbMode == i, accent);
         }
 
         knobBass.setValue(p.bassBoost, animate);
@@ -1427,6 +1648,76 @@ public class MainActivity extends Activity implements DrawerPanels.Host {
         EqService.startOrRefresh(this);
         Toast.makeText(this, s.bubbleEnabled ? "Floating bubble companion ON" : "Floating bubble hidden", Toast.LENGTH_SHORT).show();
         refreshAllUi(false);
+    }
+
+    private void showPrecisionFineTuneDialog(int bandIndex, String freqLabel, float currentDb) {
+        EqStore.EqPreset p = store.getActivePreset();
+        if (p == null) return;
+        int accent = p.accentColor;
+        final float[] val = new float[]{Math.round(currentDb * 10f) / 10f};
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = UiStyle.dp(this, 16);
+        box.setPadding(pad, pad, pad, pad);
+
+        EditText et = new EditText(this);
+        et.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        et.setText(String.format(Locale.US, "%.1f", val[0]));
+        et.setTextColor(accent);
+        et.setTextSize(22f);
+        et.setGravity(Gravity.CENTER);
+        box.addView(et);
+
+        LinearLayout nudgeRow = new LinearLayout(this);
+        nudgeRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams nrLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        nrLp.topMargin = UiStyle.dp(this, 10);
+
+        String[] labels = new String[]{"-1.0", "-0.1", "0.0", "+0.1", "+1.0"};
+        float[] deltas = new float[]{-1.0f, -0.1f, 0f, 0.1f, 1.0f};
+        for (int i = 0; i < 5; i++) {
+            final int idx = i;
+            TextView btn = UiStyle.makePill(this, labels[i], i == 2, accent);
+            btn.setTextSize(12f);
+            btn.setOnClickListener(v -> {
+                UiStyle.hapticTick(v, this);
+                if (idx == 2) val[0] = 0f;
+                else val[0] = EqStore.clamp(Math.round((val[0] + deltas[idx]) * 10f) / 10f, -EqStore.MAX_GAIN_DB, EqStore.MAX_GAIN_DB);
+                et.setText(String.format(Locale.US, "%.1f", val[0]));
+            });
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (i < 4) blp.rightMargin = UiStyle.dp(this, 5);
+            nudgeRow.addView(btn, blp);
+        }
+        box.addView(nudgeRow, nrLp);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Fine Tune • " + freqLabel + " (±18.0 dB)")
+                .setView(box)
+                .setPositiveButton("Apply", (d, w) -> {
+                    float parsed = val[0];
+                    try { parsed = Float.parseFloat(et.getText().toString().trim()); }
+                    catch (Throwable ignored) {}
+                    parsed = EqStore.clamp(Math.round(parsed * 10f) / 10f, -EqStore.MAX_GAIN_DB, EqStore.MAX_GAIN_DB);
+                    pushUndo(p);
+                    int bm = store.getSettings().bandMode;
+                    if (bm == EqStore.BANDS_15 && bandIndex < 15) {
+                        p.bands15[bandIndex] = parsed;
+                        p.bands10 = EqStore.resample15To10(p.bands15);
+                    } else if (bm == EqStore.BANDS_10 && bandIndex < 10) {
+                        p.bands10[bandIndex] = parsed;
+                        p.bands15 = EqStore.resample10To15(p.bands10);
+                    } else {
+                        EqStore.apply5BandChange(p, bandIndex, parsed);
+                    }
+                    store.addOrUpdatePreset(p);
+                    EqService.startOrRefresh(this);
+                    refreshAllUi(true);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     private void showLockedToast() {

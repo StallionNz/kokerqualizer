@@ -2,6 +2,15 @@
 
 All notable changes to **Kokerqualizer** are documented in this file.
 
+## [1.6.0] - 2026-11-21
+### Added
+- **Switchable 5 / 10 / 15-Band Pro EQ** (classic 2/3-octave studio ISO layout: `25 Hz – 16 kHz`) with **Long-Press `0.1 dB` Precision Fine Tuner** dialog.
+- **Volume-Aware Auto-Loudness** (Fletcher-Munson contour that dynamically enriches bass & sparkle at low media volumes and tapers smoothly at high volume).
+- **2D X/Y Sound Morph Pad** (collapsible zero-allocation glowing vector pad to drag-sculpt Deep Sub / Crystal Vocal / Warm / Punchy live).
+- **Guided Speaker & Car Calibration Wizard** (7 stepped reference tones with safe level slider that auto-generates a compensated custom preset).
+- **Acoustic Space Reverb** (`Off`, `Studio`, `Club`, `Hall`, `Cabin`) + **Mono Speaker** optimization toggle.
+- **Restore Factory Presets** button inside Preset Library.
+
 ## [1.5.5] - 2026-11-21
 ### Fixed
 - Prevented tapping the floating 3D orb to close its popup from immediately bouncing back open (`ACTION_OUTSIDE` + orb tap debounce).
