@@ -2,6 +2,8 @@ package com.buddyapps.kokerqualizer;
 
 import android.content.ComponentName;
 import android.content.Context;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
@@ -17,6 +19,7 @@ import android.view.KeyEvent;
 import java.util.List;
 
 public class KokerMediaListenerService extends NotificationListenerService {
+    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
 
     public static boolean hasMediaAccess(Context ctx) {
         try {
@@ -83,6 +86,19 @@ public class KokerMediaListenerService extends NotificationListenerService {
         return st != null && st.getState() == PlaybackState.STATE_PLAYING;
     }
 
+    public static String getActivePlayingPackage(Context ctx) {
+        MediaController mc = getActiveController(ctx);
+        if (mc == null) return null;
+        try {
+            PlaybackState st = mc.getPlaybackState();
+            if (st != null && (st.getState() == PlaybackState.STATE_PLAYING
+                    || st.getState() == PlaybackState.STATE_BUFFERING)) {
+                return mc.getPackageName();
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
     public static boolean skipNext(Context ctx) {
         MediaController mc = getActiveController(ctx);
         if (mc != null) {
@@ -124,13 +140,58 @@ public class KokerMediaListenerService extends NotificationListenerService {
         return false;
     }
 
+    public static void pauseAllMedia(Context ctx) {
+        boolean pausedAnyController = false;
+        if (hasMediaAccess(ctx)) {
+            try {
+                MediaSessionManager mgr = (MediaSessionManager) ctx.getSystemService(Context.MEDIA_SESSION_SERVICE);
+                if (mgr != null) {
+                    List<MediaController> list = mgr.getActiveSessions(new ComponentName(ctx, KokerMediaListenerService.class));
+                    if (list != null) {
+                        for (MediaController mc : list) {
+                            try {
+                                PlaybackState st = mc.getPlaybackState();
+                                if (st != null && (st.getState() == PlaybackState.STATE_PLAYING
+                                        || st.getState() == PlaybackState.STATE_BUFFERING)) {
+                                    mc.getTransportControls().pause();
+                                    pausedAnyController = true;
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        try {
+            AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                if (!pausedAnyController && am.isMusicActive()) {
+                    sendTimedMediaKey(ctx, KeyEvent.KEYCODE_MEDIA_PAUSE);
+                }
+                // Briefly claim exclusive audio focus so EVERY playing audio app (Spotify, YouTube, Chrome, podcasts)
+                // pauses immediately even when Notification Access is not granted!
+                AudioFocusRequest afr = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                        .setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                .build())
+                        .setOnAudioFocusChangeListener(change -> {})
+                        .build();
+                am.requestAudioFocus(afr);
+                MAIN_HANDLER.postDelayed(() -> {
+                    try { am.abandonAudioFocusRequest(afr); } catch (Throwable ignored) {}
+                }, 350);
+            }
+        } catch (Throwable ignored) {}
+    }
+
     private static void sendTimedMediaKey(Context ctx, int keyCode) {
         try {
             AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
             if (am == null) return;
             long downTime = SystemClock.uptimeMillis();
             am.dispatchMediaKeyEvent(new KeyEvent(downTime, downTime, KeyEvent.ACTION_DOWN, keyCode, 0));
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            MAIN_HANDLER.postDelayed(() -> {
                 try {
                     long upTime = SystemClock.uptimeMillis();
                     am.dispatchMediaKeyEvent(new KeyEvent(downTime, upTime, KeyEvent.ACTION_UP, keyCode, 0));

@@ -14,11 +14,13 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <application
         android:label="Kokerqualizer"
         android:icon="@drawable/ic_launcher"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
         <activity
@@ -34,7 +36,7 @@
 
         <activity
             android:name=".CarModeActivity"
-            android:exported="true"
+            android:exported="false"
             android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|keyboardHidden" />
 
@@ -91,6 +93,19 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".KokerMiniWidgetProvider"
+            android:label="Kokerqualizer Orb (1x1)"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="com.buddyapps.kokerqualizer.MINI_WIDGET_TOGGLE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_mini_info" />
         </receiver>
 
     </application>

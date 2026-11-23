@@ -31,7 +31,7 @@ A standalone, zero-bloat Android graphic equalizer, mastering DSP deck, floating
 
 ## Installation (Standalone APK)
 
-1. Download `kokerqualizer-v1.5.5.apk` from the [GitHub Releases](../../releases) page.
+1. Download `kokerqualizer-v2.0.3.apk` from the [GitHub Releases](../../releases) page.
 2. Open the APK on any Android 9+ device and allow installation from your browser or file manager if prompted.
 3. Verify the APK integrity against `SHA256SUMS.txt` attached to the release.
 4. *(Samsung tip)* Turn off Samsung's built-in **Dolby Atmos / Equalizer** in Android Sound settings if it competes with Kokerqualizer, and open **Audio Health Check** inside the app to enable optional permissions (Mic for live visualizer, Bluetooth for car auto-start, Appear on top for the 3D orb, Notification access for song skip).

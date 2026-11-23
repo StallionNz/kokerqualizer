@@ -36,10 +36,12 @@ public class EqService extends Service {
     public static final String ACTION_BT_CONNECTED = "com.buddyapps.kokerqualizer.BT_CONNECTED";
     public static final String ACTION_BT_DISCONNECTED = "com.buddyapps.kokerqualizer.BT_DISCONNECTED";
     public static final String ACTION_STATE_BROADCAST = "com.buddyapps.kokerqualizer.STATE_CHANGED";
+    public static final String ACTION_APP_SHUTDOWN = "com.buddyapps.kokerqualizer.APP_SHUTDOWN";
 
     public static final String EXTRA_BT_ADDRESS = "bt_address";
     public static final String EXTRA_BT_NAME = "bt_name";
 
+    private static final Object BT_LOCK = new Object();
     private static String lastBtConnectAddr = null;
     private static long lastBtConnectMs = 0;
     private static String lastBtDisconnectAddr = null;
@@ -50,6 +52,40 @@ public class EqService extends Service {
     private BubbleOverlayManager bubbleManager;
     private boolean isForeground = false;
     private boolean wiredPluggedLast = false;
+    private final Handler appPollHandler = new Handler(Looper.getMainLooper());
+    private String lastAutoAppPkg = null;
+    private final Runnable appWatchTick = new Runnable() {
+        @Override
+        public void run() {
+            EqStore store = EqStore.get(EqService.this);
+            EqStore.Settings s = store.getSettings();
+            if (!s.perAppAutoSwitch) return; // Zero wakeups when feature is disabled!
+            if (s.eqEnabled && KokerMediaListenerService.hasMediaAccess(EqService.this)) {
+                String pkg = KokerMediaListenerService.getActivePlayingPackage(EqService.this);
+                if (pkg != null && !pkg.equals(lastAutoAppPkg)) {
+                    lastAutoAppPkg = pkg;
+                    EqStore.AppPresetRule rule = store.findAppRule(pkg);
+                    if (rule != null && rule.enabled && rule.presetId != null
+                            && !rule.presetId.equals(s.activePresetId)
+                            && store.findPreset(rule.presetId) != null) {
+                        store.setActivePreset(rule.presetId);
+                        EqEngine.get(EqService.this).setAbFlatCompare(false);
+                        EqEngine.get(EqService.this).triggerSmoothRamp();
+                        EqEngine.get(EqService.this).applyCurrent();
+                        updateNotificationAndUi();
+                    }
+                }
+            }
+            appPollHandler.postDelayed(this, 3000L);
+        }
+    };
+
+    private void syncAppWatchSchedule() {
+        appPollHandler.removeCallbacks(appWatchTick);
+        if (EqStore.get(this).getSettings().perAppAutoSwitch) {
+            appPollHandler.postDelayed(appWatchTick, 3000L);
+        }
+    }
 
     public static void startOrRefresh(Context ctx) {
         Intent i = new Intent(ctx, EqService.class);
@@ -62,6 +98,31 @@ public class EqService extends Service {
             KokerWidgetProvider.updateAll(ctx);
             EqTileService.requestRefresh(ctx);
         }
+    }
+
+    public static void shutdownAppAndMusic(Context ctx) {
+        Context app = ctx.getApplicationContext();
+        // 1. Preserve YouTube sign-in cookies & immediately stop in-app playback
+        YouTubePlayerView.flushCookiesNow();
+        YouTubePlayerView.RemoteBridge yt = YouTubePlayerView.getActiveRemoteBridge();
+        if (yt != null) {
+            try { yt.stopAll(); } catch (Throwable ignored) {}
+        }
+        // 2. Pause all active external music apps (Spotify, YouTube, YT Music, etc.)
+        KokerMediaListenerService.pauseAllMedia(app);
+        // 3. Tear down DSP engine & visualizer immediately
+        EqEngine.get(app).stopVisualizer();
+        EqEngine.get(app).releaseDsp();
+        // 4. Close MainActivity & CarModeActivity completely (even if backgrounded)
+        Intent done = new Intent(ACTION_APP_SHUTDOWN);
+        done.setPackage(app.getPackageName());
+        app.sendBroadcast(done);
+        // 5. Refresh widget/tile, cancel sleep timer silently (no DSP re-init!) & stop EqService
+        SleepTimerManager.get(app).cancelSilent();
+        KokerWidgetProvider.updateAll(app);
+        KokerMiniWidgetProvider.updateAll(app);
+        EqTileService.requestRefresh(app);
+        try { app.stopService(new Intent(app, EqService.class)); } catch (Throwable ignored) {}
     }
 
     public static void applyBtRuleDirect(Context ctx, EqStore.BtDeviceRule rule, boolean launchCar) {
@@ -108,6 +169,7 @@ public class EqService extends Service {
         bubbleManager = new BubbleOverlayManager(this);
         registerDynamicReceivers();
         registerWiredAudioCallback();
+        syncAppWatchSchedule();
     }
 
     private void registerWiredAudioCallback() {
@@ -265,14 +327,17 @@ public class EqService extends Service {
         if (ACTION_TOGGLE_POWER.equals(action)) {
             store.getSettings().eqEnabled = !store.getSettings().eqEnabled;
             store.save();
+            EqEngine.get(this).triggerSmoothRamp();
             EqEngine.get(this).applyCurrent();
         } else if (ACTION_PREV_PRESET.equals(action)) {
             store.cyclePreset(-1);
             EqEngine.get(this).setAbFlatCompare(false);
+            EqEngine.get(this).triggerSmoothRamp();
             EqEngine.get(this).applyCurrent();
         } else if (ACTION_NEXT_PRESET.equals(action)) {
             store.cyclePreset(1);
             EqEngine.get(this).setAbFlatCompare(false);
+            EqEngine.get(this).triggerSmoothRamp();
             EqEngine.get(this).applyCurrent();
         } else if (ACTION_BT_CONNECTED.equals(action) && intent != null) {
             handleBtConnected(
@@ -284,6 +349,7 @@ public class EqService extends Service {
             EqEngine.get(this).applyCurrent();
         }
 
+        syncAppWatchSchedule();
         updateNotificationAndUi();
         if (!fgOk) {
             stopSelf(startId);
@@ -295,11 +361,13 @@ public class EqService extends Service {
     private void handleBtConnected(String address, String name) {
         if (address == null) return;
         long now = System.currentTimeMillis();
-        if (address.equalsIgnoreCase(lastBtConnectAddr) && (now - lastBtConnectMs) < 3500) {
-            return;
+        synchronized (BT_LOCK) {
+            if (address.equalsIgnoreCase(lastBtConnectAddr) && (now - lastBtConnectMs) < 3500) {
+                return;
+            }
+            lastBtConnectAddr = address;
+            lastBtConnectMs = now;
         }
-        lastBtConnectAddr = address;
-        lastBtConnectMs = now;
 
         EqStore store = EqStore.get(this);
         EqStore.BtDeviceRule rule = store.findBtRule(address);
@@ -316,11 +384,13 @@ public class EqService extends Service {
     private void handleBtDisconnected(String address) {
         if (address == null) return;
         long now = System.currentTimeMillis();
-        if (address.equalsIgnoreCase(lastBtDisconnectAddr) && (now - lastBtDisconnectMs) < 3500) {
-            return;
+        synchronized (BT_LOCK) {
+            if (address.equalsIgnoreCase(lastBtDisconnectAddr) && (now - lastBtDisconnectMs) < 3500) {
+                return;
+            }
+            lastBtDisconnectAddr = address;
+            lastBtDisconnectMs = now;
         }
-        lastBtDisconnectAddr = address;
-        lastBtDisconnectMs = now;
 
         EqStore store = EqStore.get(this);
         EqStore.BtDeviceRule rule = store.findBtRule(address);
@@ -363,6 +433,7 @@ public class EqService extends Service {
             }
         }
         KokerWidgetProvider.updateAll(this);
+        KokerMiniWidgetProvider.updateAll(this);
         EqTileService.requestRefresh(this);
         Intent b = new Intent(ACTION_STATE_BROADCAST);
         b.setPackage(getPackageName());
@@ -428,8 +499,18 @@ public class EqService extends Service {
     }
 
     @Override
+    @SuppressWarnings("deprecation")
     public void onDestroy() {
         isForeground = false;
+        appPollHandler.removeCallbacksAndMessages(null);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) stopForeground(STOP_FOREGROUND_REMOVE);
+            else stopForeground(true);
+        } catch (Throwable ignored) {}
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel(NOTIF_ID);
+        } catch (Throwable ignored) {}
         if (bubbleManager != null) {
             bubbleManager.hide();
         }

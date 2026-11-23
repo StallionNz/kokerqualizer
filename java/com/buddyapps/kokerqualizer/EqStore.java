@@ -16,6 +16,7 @@ public class EqStore {
     private static final String PREFS = "kokerqualizer_prefs";
     private static final String KEY_PRESETS = "presets_json";
     private static final String KEY_BT_RULES = "bt_rules_json";
+    private static final String KEY_APP_RULES = "app_rules_json";
     private static final String KEY_SETTINGS = "settings_json";
     private static final String KEY_NEON_GREEN_MIGRATED = "neon_green_v1";
 
@@ -38,6 +39,16 @@ public class EqStore {
     public static final int VIZ_BARS = 0;
     public static final int VIZ_WAVE = 1;
     public static final int VIZ_VU = 2;
+    public static final int VIZ_MIRROR = 3;
+
+    public static final int LIM_LOUD = 0;   // -0.1 dB
+    public static final int LIM_SAFE = 1;   // -1.0 dB
+    public static final int LIM_STUDIO = 2; // -3.0 dB
+
+    public static final int ORB_DT_POPUP = 0;
+    public static final int ORB_DT_NEXT = 1;
+    public static final int ORB_DT_TOGGLE_EQ = 2;
+    public static final int ORB_DT_CAR = 3;
 
     public static final int HOOK_DUAL = 0;
     public static final int HOOK_GLOBAL = 1;
@@ -104,6 +115,15 @@ public class EqStore {
         public float balance = 0f;         // -100..+100
         public int reverbMode = REVERB_OFF;// 0..4
         public boolean carSubMode = false;
+        public boolean subSonicFilter = false; // #1 20-30Hz rumble cut
+        public boolean analogWarmth = false;   // #2 harmonic warmth exciter
+        public boolean crossfeed = false;      // #5 headphone crossfeed
+        public boolean nightWhisper = false;   // #6 late-night dialogue compressor
+        public int limiterCeilingMode = LIM_SAFE; // #8 0=-0.1dB, 1=-1.0dB, 2=-3.0dB
+        public float bassTiltDb = 0f;          // #9 -6..+6 dB quick bass tilt
+        public float trebleTiltDb = 0f;        // #9 -6..+6 dB quick treble tilt
+        public String tags = "";               // #17 e.g. "#Car #Bass"
+        public String notes = "";              // #17 custom preset note
 
         public EqPreset copy(String newId, String newName, boolean isBuiltIn) {
             EqPreset p = new EqPreset();
@@ -124,6 +144,15 @@ public class EqStore {
             p.balance = balance;
             p.reverbMode = reverbMode;
             p.carSubMode = carSubMode;
+            p.subSonicFilter = subSonicFilter;
+            p.analogWarmth = analogWarmth;
+            p.crossfeed = crossfeed;
+            p.nightWhisper = nightWhisper;
+            p.limiterCeilingMode = limiterCeilingMode;
+            p.bassTiltDb = bassTiltDb;
+            p.trebleTiltDb = trebleTiltDb;
+            p.tags = tags != null ? tags : "";
+            p.notes = notes != null ? notes : "";
             return p;
         }
 
@@ -151,14 +180,25 @@ public class EqStore {
                 o.put("balance", (double) balance);
                 o.put("reverbMode", reverbMode);
                 o.put("carSubMode", carSubMode);
+                o.put("subSonicFilter", subSonicFilter);
+                o.put("analogWarmth", analogWarmth);
+                o.put("crossfeed", crossfeed);
+                o.put("nightWhisper", nightWhisper);
+                o.put("limiterCeilingMode", limiterCeilingMode);
+                o.put("bassTiltDb", (double) bassTiltDb);
+                o.put("trebleTiltDb", (double) trebleTiltDb);
+                o.put("tags", tags != null ? tags : "");
+                o.put("notes", notes != null ? notes : "");
             } catch (Exception ignored) {}
             return o;
         }
 
         public static EqPreset fromJson(JSONObject o) {
             EqPreset p = new EqPreset();
-            p.id = o.optString("id", UUID.randomUUID().toString());
-            p.name = o.optString("name", "Custom");
+            p.id = o.optString("id", "").trim();
+            if (p.id.isEmpty()) p.id = "usr_" + UUID.randomUUID().toString().substring(0, 8);
+            p.name = o.optString("name", "").trim();
+            if (p.name.isEmpty()) p.name = "Custom";
             p.accentColor = o.optInt("accentColor", DEFAULT_ACCENT);
             p.builtIn = o.optBoolean("builtIn", false);
             p.favorite = o.optBoolean("favorite", false);
@@ -186,7 +226,43 @@ public class EqStore {
             p.balance = clamp((float) o.optDouble("balance", 0.0), -100f, 100f);
             p.reverbMode = Math.max(0, Math.min(4, o.optInt("reverbMode", REVERB_OFF)));
             p.carSubMode = o.optBoolean("carSubMode", false);
+            p.subSonicFilter = o.optBoolean("subSonicFilter", false);
+            p.analogWarmth = o.optBoolean("analogWarmth", false);
+            p.crossfeed = o.optBoolean("crossfeed", false);
+            p.nightWhisper = o.optBoolean("nightWhisper", false);
+            p.limiterCeilingMode = Math.max(0, Math.min(2, o.optInt("limiterCeilingMode", LIM_SAFE)));
+            p.bassTiltDb = clamp((float) o.optDouble("bassTiltDb", 0.0), -6f, 6f);
+            p.trebleTiltDb = clamp((float) o.optDouble("trebleTiltDb", 0.0), -6f, 6f);
+            p.tags = o.optString("tags", "");
+            p.notes = o.optString("notes", "");
             return p;
+        }
+    }
+
+    public static class AppPresetRule {
+        public String packageName;
+        public String appLabel;
+        public String presetId;
+        public boolean enabled = true;
+
+        public JSONObject toJson() {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("packageName", packageName);
+                o.put("appLabel", appLabel);
+                o.put("presetId", presetId);
+                o.put("enabled", enabled);
+            } catch (Exception ignored) {}
+            return o;
+        }
+
+        public static AppPresetRule fromJson(JSONObject o) {
+            AppPresetRule r = new AppPresetRule();
+            r.packageName = o.optString("packageName", "");
+            r.appLabel = o.optString("appLabel", "Music App");
+            r.presetId = o.optString("presetId", "car_bass");
+            r.enabled = o.optBoolean("enabled", true);
+            return r;
         }
     }
 
@@ -250,6 +326,24 @@ public class EqStore {
         public int bubbleY = 380;
         public boolean bubbleRightEdge = true;
         public boolean morphPadVisible = false;
+        public boolean tiltBarVisible = false;    // #9 quick Bass/Treble tilt macro sliders
+        public boolean smoothGainRamp = true;     // #7 clickless 250ms fade on switch
+        public boolean vizEqOverlay = true;       // #11 FabFilter-style EQ curve on live spectrum
+        public int vizDecaySpeed = 1;             // #13 0=Slow, 1=Med, 2=Fast
+        public boolean vizGradientBars = false;   // #14 multi-color cyberpunk gradient spectrum
+        public boolean compactDeckMode = false;   // #15 Zen mode (collapse viz/knobs)
+        public String comparePresetId = null;     // #16 A/B/C comparison B-slot preset
+        public boolean bottomBarPulse = true;     // #20 bass-reactive bottom bar glow
+        public boolean orbBeatReactive = true;    // #21 audio-reactive 3D orb
+        public int orbSizeMode = 1;               // #22 0=Small(60), 1=Med(74), 2=Large(88)
+        public boolean orbAutoFade = true;        // #22 fade idle orb to 45% opacity
+        public int orbDoubleTapAction = ORB_DT_POPUP; // #23 double-tap shortcut
+        public String orbLetter = "K";            // #24 custom monogram inside orb
+        public boolean orbAutoTuckLandscape = false; // #25 slim edge tab in landscape
+        public boolean carVoiceAnnounce = false;  // #28 TTS preset announcement
+        public boolean carNightDim = false;       // #30 low-glare night dash
+        public boolean carGpsHighway = false;     // #31 GPS speed-linked HWY boost
+        public boolean perAppAutoSwitch = false;  // #37 per-app auto-preset profiles
         public String activePresetId = "car_bass";
         public String phonePresetId = "phone_speaker";
 
@@ -280,6 +374,24 @@ public class EqStore {
                 o.put("bubbleY", bubbleY);
                 o.put("bubbleRightEdge", bubbleRightEdge);
                 o.put("morphPadVisible", morphPadVisible);
+                o.put("tiltBarVisible", tiltBarVisible);
+                o.put("smoothGainRamp", smoothGainRamp);
+                o.put("vizEqOverlay", vizEqOverlay);
+                o.put("vizDecaySpeed", vizDecaySpeed);
+                o.put("vizGradientBars", vizGradientBars);
+                o.put("compactDeckMode", compactDeckMode);
+                if (comparePresetId != null) o.put("comparePresetId", comparePresetId);
+                o.put("bottomBarPulse", bottomBarPulse);
+                o.put("orbBeatReactive", orbBeatReactive);
+                o.put("orbSizeMode", orbSizeMode);
+                o.put("orbAutoFade", orbAutoFade);
+                o.put("orbDoubleTapAction", orbDoubleTapAction);
+                o.put("orbLetter", orbLetter != null ? orbLetter : "K");
+                o.put("orbAutoTuckLandscape", orbAutoTuckLandscape);
+                o.put("carVoiceAnnounce", carVoiceAnnounce);
+                o.put("carNightDim", carNightDim);
+                o.put("carGpsHighway", carGpsHighway);
+                o.put("perAppAutoSwitch", perAppAutoSwitch);
                 o.put("activePresetId", activePresetId);
                 o.put("phonePresetId", phonePresetId);
             } catch (Exception ignored) {}
@@ -307,7 +419,7 @@ public class EqStore {
             s.carVizBackdrop = o.optBoolean("carVizBackdrop", true);
             s.wiredAutoSwitch = o.optBoolean("wiredAutoSwitch", true);
             s.wiredPresetId = o.optString("wiredPresetId", "headphones");
-            s.visualizerMode = o.optInt("visualizerMode", VIZ_BARS);
+            s.visualizerMode = Math.max(0, Math.min(3, o.optInt("visualizerMode", VIZ_BARS)));
             s.hookMode = o.optInt("hookMode", HOOK_DUAL);
             s.startOnBoot = o.optBoolean("startOnBoot", true);
             s.carKeepScreenOn = o.optBoolean("carKeepScreenOn", true);
@@ -316,6 +428,25 @@ public class EqStore {
             s.bubbleY = o.optInt("bubbleY", 380);
             s.bubbleRightEdge = o.optBoolean("bubbleRightEdge", true);
             s.morphPadVisible = o.optBoolean("morphPadVisible", false);
+            s.tiltBarVisible = o.optBoolean("tiltBarVisible", false);
+            s.smoothGainRamp = o.optBoolean("smoothGainRamp", true);
+            s.vizEqOverlay = o.optBoolean("vizEqOverlay", true);
+            s.vizDecaySpeed = Math.max(0, Math.min(2, o.optInt("vizDecaySpeed", 1)));
+            s.vizGradientBars = o.optBoolean("vizGradientBars", false);
+            s.compactDeckMode = o.optBoolean("compactDeckMode", false);
+            s.comparePresetId = o.has("comparePresetId") ? o.optString("comparePresetId", null) : null;
+            s.bottomBarPulse = o.optBoolean("bottomBarPulse", true);
+            s.orbBeatReactive = o.optBoolean("orbBeatReactive", true);
+            s.orbSizeMode = Math.max(0, Math.min(2, o.optInt("orbSizeMode", 1)));
+            s.orbAutoFade = o.optBoolean("orbAutoFade", true);
+            s.orbDoubleTapAction = Math.max(0, Math.min(3, o.optInt("orbDoubleTapAction", ORB_DT_POPUP)));
+            String ol = o.optString("orbLetter", "K").trim();
+            s.orbLetter = firstCodePoint(ol, "K");
+            s.orbAutoTuckLandscape = o.optBoolean("orbAutoTuckLandscape", false);
+            s.carVoiceAnnounce = o.optBoolean("carVoiceAnnounce", false);
+            s.carNightDim = o.optBoolean("carNightDim", false);
+            s.carGpsHighway = o.optBoolean("carGpsHighway", false);
+            s.perAppAutoSwitch = o.optBoolean("perAppAutoSwitch", false);
             s.activePresetId = o.optString("activePresetId", "car_bass");
             s.phonePresetId = o.optString("phonePresetId", "phone_speaker");
             return s;
@@ -326,6 +457,7 @@ public class EqStore {
     private final SharedPreferences prefs;
     private final List<EqPreset> presets = new ArrayList<>();
     private final List<BtDeviceRule> btRules = new ArrayList<>();
+    private final List<AppPresetRule> appRules = new ArrayList<>();
     private Settings settings = new Settings();
 
     public static synchronized EqStore get(Context ctx) {
@@ -343,6 +475,7 @@ public class EqStore {
     private void load() {
         presets.clear();
         btRules.clear();
+        appRules.clear();
         String pJson = prefs.getString(KEY_PRESETS, null);
         if (pJson != null) {
             try {
@@ -364,6 +497,19 @@ public class EqStore {
                     btRules.add(BtDeviceRule.fromJson(arr.getJSONObject(i)));
                 }
             } catch (Exception ignored) {}
+        }
+
+        String aJson = prefs.getString(KEY_APP_RULES, null);
+        if (aJson != null) {
+            try {
+                JSONArray arr = new JSONArray(aJson);
+                for (int i = 0; i < arr.length(); i++) {
+                    appRules.add(AppPresetRule.fromJson(arr.getJSONObject(i)));
+                }
+            } catch (Exception ignored) {}
+        }
+        if (appRules.isEmpty()) {
+            appRules.addAll(createDefaultAppRules());
         }
 
         String sJson = prefs.getString(KEY_SETTINGS, null);
@@ -399,11 +545,91 @@ public class EqStore {
         for (EqPreset p : presets) pArr.put(p.toJson());
         JSONArray bArr = new JSONArray();
         for (BtDeviceRule r : btRules) bArr.put(r.toJson());
+        JSONArray aArr = new JSONArray();
+        for (AppPresetRule r : appRules) aArr.put(r.toJson());
         prefs.edit()
                 .putString(KEY_PRESETS, pArr.toString())
                 .putString(KEY_BT_RULES, bArr.toString())
+                .putString(KEY_APP_RULES, aArr.toString())
                 .putString(KEY_SETTINGS, settings.toJson().toString())
                 .apply();
+    }
+
+    public synchronized List<AppPresetRule> getAppRules() { return new ArrayList<>(appRules); }
+
+    public synchronized AppPresetRule findAppRule(String pkg) {
+        if (pkg == null) return null;
+        for (AppPresetRule r : appRules) {
+            if (pkg.equalsIgnoreCase(r.packageName)) return r;
+        }
+        return null;
+    }
+
+    public synchronized void putAppRule(AppPresetRule rule) {
+        for (int i = 0; i < appRules.size(); i++) {
+            if (appRules.get(i).packageName.equalsIgnoreCase(rule.packageName)) {
+                appRules.set(i, rule);
+                save();
+                return;
+            }
+        }
+        appRules.add(rule);
+        save();
+    }
+
+    private static List<AppPresetRule> createDefaultAppRules() {
+        List<AppPresetRule> list = new ArrayList<>();
+        list.add(makeAppRule("com.spotify.music", "Spotify", "car_bass", false));
+        list.add(makeAppRule("com.google.android.apps.youtube.music", "YouTube Music", "edm_club", false));
+        list.add(makeAppRule("com.google.android.youtube", "YouTube", "vocal_podcast", false));
+        list.add(makeAppRule("com.audible.application", "Audible / Podcasts", "vocal_podcast", false));
+        list.add(makeAppRule("com.soundcloud.android", "SoundCloud", "deep_sub", false));
+        return list;
+    }
+
+    private static AppPresetRule makeAppRule(String pkg, String label, String presetId, boolean enabled) {
+        AppPresetRule r = new AppPresetRule();
+        r.packageName = pkg;
+        r.appLabel = label;
+        r.presetId = presetId;
+        r.enabled = enabled;
+        return r;
+    }
+
+    public static void smoothBands(EqPreset p) {
+        if (p == null) return;
+        float[] s10 = new float[10];
+        for (int i = 0; i < 10; i++) {
+            float prev = i > 0 ? p.bands10[i - 1] : p.bands10[i];
+            float next = i < 9 ? p.bands10[i + 1] : p.bands10[i];
+            s10[i] = Math.round((prev * 0.25f + p.bands10[i] * 0.50f + next * 0.25f) * 10f) / 10f;
+        }
+        p.bands10 = s10;
+        float[] s15 = new float[15];
+        for (int i = 0; i < 15; i++) {
+            float prev = i > 0 ? p.bands15[i - 1] : p.bands15[i];
+            float next = i < 14 ? p.bands15[i + 1] : p.bands15[i];
+            s15[i] = Math.round((prev * 0.25f + p.bands15[i] * 0.50f + next * 0.25f) * 10f) / 10f;
+        }
+        p.bands15 = s15;
+    }
+
+    public static String firstCodePoint(String raw, String fallback) {
+        if (raw == null) return fallback;
+        String t = raw.trim();
+        if (t.isEmpty()) return fallback;
+        try {
+            int end = t.offsetByCodePoints(0, 1);
+            return t.substring(0, end);
+        } catch (Throwable ignored) {
+            return t.substring(0, 1);
+        }
+    }
+
+    public static String limiterCeilingLabel(int mode) {
+        if (mode == LIM_LOUD) return "-0.1dB Loud";
+        if (mode == LIM_STUDIO) return "-3.0dB Studio";
+        return "-1.0dB Safe";
     }
 
     public synchronized int restoreFactoryPresets() {
@@ -502,6 +728,7 @@ public class EqStore {
                 if (id.equals(settings.activePresetId)) settings.activePresetId = presets.get(0).id;
                 if (id.equals(settings.phonePresetId)) settings.phonePresetId = presets.get(0).id;
                 if (id.equals(settings.wiredPresetId)) settings.wiredPresetId = presets.get(0).id;
+                if (id.equals(settings.comparePresetId)) settings.comparePresetId = null;
                 save();
                 return true;
             }
@@ -532,16 +759,25 @@ public class EqStore {
     }
 
     public synchronized String exportAllJson() {
+        return exportAllJson(true);
+    }
+
+    public synchronized String exportAllJson(boolean includeBtRules) {
         JSONObject root = new JSONObject();
         try {
             root.put("app", "Kokerqualizer");
-            root.put("formatVersion", 3);
+            root.put("formatVersion", 4);
             JSONArray pArr = new JSONArray();
             for (EqPreset p : presets) pArr.put(p.toJson());
             root.put("presets", pArr);
-            JSONArray bArr = new JSONArray();
-            for (BtDeviceRule r : btRules) bArr.put(r.toJson());
-            root.put("btRules", bArr);
+            if (includeBtRules) {
+                JSONArray bArr = new JSONArray();
+                for (BtDeviceRule r : btRules) bArr.put(r.toJson());
+                root.put("btRules", bArr);
+            }
+            JSONArray aArr = new JSONArray();
+            for (AppPresetRule ar : appRules) aArr.put(ar.toJson());
+            root.put("appRules", aArr);
             root.put("settings", settings.toJson());
             return root.toString(2);
         } catch (Exception e) {
@@ -553,7 +789,7 @@ public class EqStore {
         JSONObject root = new JSONObject();
         try {
             root.put("app", "Kokerqualizer");
-            root.put("formatVersion", 3);
+            root.put("formatVersion", 4);
             root.put("preset", preset.toJson());
             return root.toString(2);
         } catch (Exception e) {
@@ -575,15 +811,36 @@ public class EqStore {
             JSONArray arr = root.getJSONArray("presets");
             for (int i = 0; i < arr.length(); i++) {
                 EqPreset p = EqPreset.fromJson(arr.getJSONObject(i));
-                EqPreset existing = findPreset(p.id);
-                if (existing != null) addOrUpdatePreset(p);
+                int existingIdx = -1;
+                for (int k = 0; k < presets.size(); k++) {
+                    if (presets.get(k).id.equals(p.id)) { existingIdx = k; break; }
+                }
+                if (existingIdx >= 0) presets.set(existingIdx, p);
                 else presets.add(p);
                 count++;
             }
             if (root.has("btRules")) {
                 JSONArray bArr = root.getJSONArray("btRules");
                 for (int i = 0; i < bArr.length(); i++) {
-                    putBtRule(BtDeviceRule.fromJson(bArr.getJSONObject(i)));
+                    BtDeviceRule rule = BtDeviceRule.fromJson(bArr.getJSONObject(i));
+                    int idx = -1;
+                    for (int k = 0; k < btRules.size(); k++) {
+                        if (btRules.get(k).address.equalsIgnoreCase(rule.address)) { idx = k; break; }
+                    }
+                    if (idx >= 0) btRules.set(idx, rule);
+                    else btRules.add(rule);
+                }
+            }
+            if (root.has("appRules")) {
+                JSONArray aArr = root.getJSONArray("appRules");
+                for (int i = 0; i < aArr.length(); i++) {
+                    AppPresetRule ar = AppPresetRule.fromJson(aArr.getJSONObject(i));
+                    int idx = -1;
+                    for (int k = 0; k < appRules.size(); k++) {
+                        if (appRules.get(k).packageName.equalsIgnoreCase(ar.packageName)) { idx = k; break; }
+                    }
+                    if (idx >= 0) appRules.set(idx, ar);
+                    else appRules.add(ar);
                 }
             }
         } else if (root.has("bands10")) {

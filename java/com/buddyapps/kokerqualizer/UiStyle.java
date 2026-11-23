@@ -8,6 +8,7 @@ import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.view.WindowInsets;
+import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
@@ -135,5 +136,19 @@ public class UiStyle {
         if (EqStore.get(ctx).getSettings().hapticsEnabled) {
             v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
         }
+    }
+
+    public static LinearLayout.LayoutParams rowLp(float weight, int rightMarginPx) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight);
+        lp.rightMargin = rightMarginPx;
+        return lp;
+    }
+
+    public static LinearLayout.LayoutParams wrapLp(int leftMarginPx, int rightMarginPx) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = leftMarginPx;
+        lp.rightMargin = rightMarginPx;
+        return lp;
     }
 }

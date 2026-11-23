@@ -14,6 +14,7 @@ public class YouTubeStore {
     private static final String PREFS = "kokerqualizer_yt_prefs";
     private static final String KEY_PLAYLISTS = "playlists_json";
     private static final String KEY_STATE = "yt_state_json";
+    private static final String KEY_HISTORY = "yt_history_json";
 
     public static class Track {
         public String videoId;
@@ -96,6 +97,8 @@ public class YouTubeStore {
         public boolean autoSyncOnStartup = true;
         public boolean autoPlayOnStartup = true;
         public boolean shuffle = false;
+        public boolean repeatOne = false;      // #33
+        public float playbackSpeed = 1.0f;     // #34 (0.75 / 1.0 / 1.25 / 1.5)
         public boolean fullWebMode = false;
         public boolean videoExpanded = true;
         public String lastWebUrl = null;
@@ -108,6 +111,8 @@ public class YouTubeStore {
                 o.put("autoSyncOnStartup", autoSyncOnStartup);
                 o.put("autoPlayOnStartup", autoPlayOnStartup);
                 o.put("shuffle", shuffle);
+                o.put("repeatOne", repeatOne);
+                o.put("playbackSpeed", (double) playbackSpeed);
                 o.put("fullWebMode", fullWebMode);
                 o.put("videoExpanded", videoExpanded);
                 if (lastWebUrl != null) o.put("lastWebUrl", lastWebUrl);
@@ -123,6 +128,8 @@ public class YouTubeStore {
             s.autoSyncOnStartup = o.optBoolean("autoSyncOnStartup", true);
             s.autoPlayOnStartup = o.optBoolean("autoPlayOnStartup", true);
             s.shuffle = o.optBoolean("shuffle", false);
+            s.repeatOne = o.optBoolean("repeatOne", false);
+            s.playbackSpeed = EqStore.clamp((float) o.optDouble("playbackSpeed", 1.0), 0.5f, 2.0f);
             s.fullWebMode = o.optBoolean("fullWebMode", false);
             s.videoExpanded = o.optBoolean("videoExpanded", true);
             s.lastWebUrl = o.has("lastWebUrl") ? o.optString("lastWebUrl", null) : null;
@@ -133,6 +140,8 @@ public class YouTubeStore {
     private static YouTubeStore instance;
     private final SharedPreferences prefs;
     private final List<SavedPlaylist> playlists = new ArrayList<>();
+    private final List<Track> recentHistory = new ArrayList<>();
+    private final List<Track> playNextQueue = new ArrayList<>();
     private YtState state = new YtState();
 
     public static synchronized YouTubeStore get(Context ctx) {
@@ -169,15 +178,62 @@ public class YouTubeStore {
         if (getActivePlaylist() == null && !playlists.isEmpty()) {
             state.activePlaylistId = playlists.get(0).id;
         }
+        recentHistory.clear();
+        String hJson = prefs.getString(KEY_HISTORY, null);
+        if (hJson != null) {
+            try {
+                JSONArray arr = new JSONArray(hJson);
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject to = arr.optJSONObject(i);
+                    if (to != null) recentHistory.add(Track.fromJson(to));
+                }
+            } catch (Exception ignored) {}
+        }
     }
 
     public synchronized void save() {
         JSONArray arr = new JSONArray();
         for (SavedPlaylist p : playlists) arr.put(p.toJson());
+        JSONArray hArr = new JSONArray();
+        for (Track t : recentHistory) hArr.put(t.toJson());
         prefs.edit()
                 .putString(KEY_PLAYLISTS, arr.toString())
                 .putString(KEY_STATE, state.toJson().toString())
+                .putString(KEY_HISTORY, hArr.toString())
                 .apply();
+    }
+
+    public synchronized void recordHistory(Track t) {
+        if (t == null || t.videoId == null || t.videoId.isEmpty()) return;
+        for (int i = recentHistory.size() - 1; i >= 0; i--) {
+            if (t.videoId.equals(recentHistory.get(i).videoId)) recentHistory.remove(i);
+        }
+        recentHistory.add(0, new Track(t.videoId, t.title, t.channel, t.duration));
+        while (recentHistory.size() > 25) recentHistory.remove(recentHistory.size() - 1);
+        save();
+    }
+
+    public synchronized List<Track> getRecentHistory() {
+        return new ArrayList<>(recentHistory);
+    }
+
+    public synchronized void queuePlayNext(Track t) {
+        if (t == null || t.videoId == null || t.videoId.isEmpty()) return;
+        if (playNextQueue.size() >= 50) playNextQueue.remove(0);
+        playNextQueue.add(new Track(t.videoId, t.title, t.channel, t.duration));
+    }
+
+    public synchronized Track pollPlayNextQueue() {
+        if (playNextQueue.isEmpty()) return null;
+        return playNextQueue.remove(0);
+    }
+
+    public synchronized int getQueueSize() {
+        return playNextQueue.size();
+    }
+
+    public synchronized void clearPlayNextQueue() {
+        playNextQueue.clear();
     }
 
     public synchronized YtState getState() { return state; }

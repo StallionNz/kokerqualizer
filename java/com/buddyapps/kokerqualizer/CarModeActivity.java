@@ -1,5 +1,6 @@
 package com.buddyapps.kokerqualizer;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -7,6 +8,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Configuration;
 import android.media.AudioManager;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -14,6 +16,7 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -25,23 +28,33 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
 public class CarModeActivity extends Activity {
+    private static final int REQ_LOC_PERM = 301;
     private EqStore store;
     private EqEngine engine;
+    private CarExtrasHelper carExtras;
     private FrameLayout frameRoot;
     private VisualizerView backdropViz;
+    private View nightDimScrim;
     private LinearLayout root;
+    private TextView clockBatTv;
     private TextView nowPlayingTv;
     private TextView playPauseBtn;
     private boolean userDragging = false;
+    private ScrollView presetScroll;
+    private float swipeDownX, swipeDownY;
+    private boolean trackingSwipe = false;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final Runnable nowPlayingPoller = new Runnable() {
         @Override
         public void run() {
             refreshNowPlayingStrip();
+            refreshClockAndBattery();
             uiHandler.postDelayed(this, 1500);
         }
     };
@@ -55,11 +68,20 @@ public class CarModeActivity extends Activity {
         }
     };
 
+    private final BroadcastReceiver shutdownReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            finishAndRemoveTask();
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         store = EqStore.get(this);
         engine = EqEngine.get(this);
+        carExtras = new CarExtrasHelper(this);
+        if (store.getSettings().carVoiceAnnounce) carExtras.initTts();
         getWindow().setStatusBarColor(UiStyle.BG_AMOLED);
         getWindow().setNavigationBarColor(UiStyle.BG_AMOLED);
         if (store.getSettings().carKeepScreenOn) {
@@ -81,8 +103,22 @@ public class CarModeActivity extends Activity {
         frameRoot.addView(root, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        // #30 Night-Dim low-glare AMOLED scrim (non-blocking overlay)
+        nightDimScrim = new View(this);
+        nightDimScrim.setBackgroundColor(0x88140404);
+        nightDimScrim.setVisibility(View.GONE);
+        nightDimScrim.setClickable(false);
+        frameRoot.addView(nightDimScrim, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
         setContentView(frameRoot);
         UiStyle.applyEdgeToEdgeInsets(frameRoot, root, pad, root, pad);
+        IntentFilter sf = new IntentFilter(EqService.ACTION_APP_SHUTDOWN);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(shutdownReceiver, sf, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(shutdownReceiver, sf);
+        }
         buildUi();
     }
 
@@ -101,6 +137,10 @@ public class CarModeActivity extends Activity {
             registerReceiver(stateReceiver, f);
         }
         syncBackdropListener();
+        applyNightDimVisual();
+        if (store.getSettings().carGpsHighway && carExtras.hasLocationPermission()) {
+            carExtras.startGpsSpeed((kmh, autoHwy) -> runOnUiThread(this::refreshClockAndBattery));
+        }
         buildUi();
         uiHandler.removeCallbacks(nowPlayingPoller);
         uiHandler.postDelayed(nowPlayingPoller, 400);
@@ -109,6 +149,13 @@ public class CarModeActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        userDragging = false;
+        try {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+            getWindow().setAttributes(lp);
+        } catch (Throwable ignored) {}
+        if (carExtras != null) carExtras.stopGpsSpeed();
         uiHandler.removeCallbacksAndMessages(null);
         try { unregisterReceiver(stateReceiver); } catch (Throwable ignored) {}
         engine.setVisualizerListener(null);
@@ -117,12 +164,116 @@ public class CarModeActivity extends Activity {
     @Override
     protected void onDestroy() {
         uiHandler.removeCallbacksAndMessages(null);
+        if (carExtras != null) carExtras.release();
+        try { unregisterReceiver(shutdownReceiver); } catch (Throwable ignored) {}
         super.onDestroy();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_LOC_PERM && carExtras != null && carExtras.hasLocationPermission()) {
+            store.getSettings().carGpsHighway = true;
+            store.save();
+            carExtras.startGpsSpeed((kmh, autoHwy) -> runOnUiThread(this::refreshClockAndBattery));
+            buildUi();
+        }
+    }
+
+    // #27 Full-Screen Swipe Gestures (Left/Right anywhere = Next/Prev; Up/Down outside preset grid = Volume)
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (!userDragging) {
+            int action = ev.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                swipeDownX = ev.getRawX();
+                swipeDownY = ev.getRawY();
+                trackingSwipe = true;
+            } else if (action == MotionEvent.ACTION_UP && trackingSwipe) {
+                trackingSwipe = false;
+                float dx = ev.getRawX() - swipeDownX;
+                float dy = ev.getRawY() - swipeDownY;
+                float thresh = UiStyle.dpf(this, 92f);
+                if (Math.abs(dx) > thresh && Math.abs(dx) > Math.abs(dy) * 1.9f) {
+                    boolean next = dx < 0;
+                    YouTubePlayerView.RemoteBridge inApp = shouldControlInAppYouTube() ? YouTubePlayerView.getActiveRemoteBridge() : null;
+                    if (inApp != null) {
+                        if (next) inApp.playNext(); else inApp.playPrev();
+                    } else {
+                        if (next) KokerMediaListenerService.skipNext(this); else KokerMediaListenerService.skipPrev(this);
+                    }
+                    Toast.makeText(this, next ? "⏭ Next Track" : "⏮ Previous Track", Toast.LENGTH_SHORT).show();
+                    uiHandler.postDelayed(this::refreshNowPlayingStrip, 350);
+                    MotionEvent cancel = MotionEvent.obtain(ev);
+                    cancel.setAction(MotionEvent.ACTION_CANCEL);
+                    super.dispatchTouchEvent(cancel);
+                    cancel.recycle();
+                    return true;
+                } else if (Math.abs(dy) > thresh && Math.abs(dy) > Math.abs(dx) * 1.9f && !isInsidePresetScroll(swipeDownX, swipeDownY)) {
+                    adjustCarVolume(dy < 0 ? 1 : -1);
+                    MotionEvent cancel = MotionEvent.obtain(ev);
+                    cancel.setAction(MotionEvent.ACTION_CANCEL);
+                    super.dispatchTouchEvent(cancel);
+                    cancel.recycle();
+                    return true;
+                }
+            } else if (action == MotionEvent.ACTION_CANCEL) {
+                trackingSwipe = false;
+            }
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    private boolean isInsidePresetScroll(float rawX, float rawY) {
+        if (presetScroll == null || presetScroll.getVisibility() != View.VISIBLE) return false;
+        int[] loc = new int[2];
+        presetScroll.getLocationOnScreen(loc);
+        return rawX >= loc[0] && rawX <= loc[0] + presetScroll.getWidth()
+                && rawY >= loc[1] && rawY <= loc[1] + presetScroll.getHeight();
+    }
+
+    private void adjustCarVolume(int dir) {
+        try {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return;
+            am.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                    dir > 0 ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER,
+                    AudioManager.FLAG_SHOW_UI);
+        } catch (Throwable ignored) {}
+    }
+
+    private void applyNightDimVisual() {
+        boolean dim = store.getSettings().carNightDim;
+        if (nightDimScrim != null) {
+            nightDimScrim.setVisibility(dim ? View.VISIBLE : View.GONE);
+        }
+        try {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.screenBrightness = dim ? 0.12f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+            getWindow().setAttributes(lp);
+        } catch (Throwable ignored) {}
+    }
+
+    private void refreshClockAndBattery() {
+        if (clockBatTv == null) return;
+        String timeStr = new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date());
+        int batPct = -1;
+        try {
+            BatteryManager bm = (BatteryManager) getSystemService(Context.BATTERY_SERVICE);
+            if (bm != null) batPct = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
+        } catch (Throwable ignored) {}
+        StringBuilder sb = new StringBuilder(timeStr);
+        if (batPct >= 0 && batPct <= 100) sb.append(" • ").append(batPct).append("%");
+        if (store.getSettings().carGpsHighway && carExtras != null && carExtras.getLastSpeedKmh() >= 0f) {
+            sb.append(" • ").append(Math.round(carExtras.getLastSpeedKmh())).append(" km/h");
+        }
+        clockBatTv.setText(sb.toString());
     }
 
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        userDragging = false;
         buildUi();
     }
 
@@ -146,6 +297,9 @@ public class CarModeActivity extends Activity {
 
         backdropViz.setMode(EqStore.VIZ_BARS);
         backdropViz.setAccentColor(accent);
+        backdropViz.setDecaySpeed(s.vizDecaySpeed);
+        backdropViz.setGradientBars(s.vizGradientBars);
+        backdropViz.setEqOverlayCurve(null, false);
         backdropViz.setEqActive(s.eqEnabled && !engine.isAbFlatCompare());
         backdropViz.setVisibility(s.carVizBackdrop ? View.VISIBLE : View.GONE);
 
@@ -155,18 +309,69 @@ public class CarModeActivity extends Activity {
         top.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView title = new TextView(this);
-        title.setText("KOKERQUALIZER  •  CAR");
+        title.setText("CAR");
         title.setTextColor(accent);
         title.setTextSize(15f);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        top.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        tLp.rightMargin = UiStyle.dp(this, 8);
+        top.addView(title, tLp);
+
+        // #29 Big Digital Clock + Battery % + GPS Speed Pill
+        clockBatTv = new TextView(this);
+        clockBatTv.setTextColor(UiStyle.TEXT_PRIMARY);
+        clockBatTv.setTextSize(13f);
+        clockBatTv.setTypeface(null, android.graphics.Typeface.BOLD);
+        clockBatTv.setSingleLine(true);
+        top.addView(clockBatTv, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        refreshClockAndBattery();
+
+        int hGap = UiStyle.dp(this, 6);
+
+        // #30 Night-Dim Low-Glare Toggle
+        TextView dimBtn = makeBigAction(
+                s.carNightDim ? "🌙" : "☀",
+                s.carNightDim ? 0xFFFF8A80 : UiStyle.TEXT_SECONDARY,
+                s.carNightDim ? 0x33FF5252 : UiStyle.SURFACE_ELEV,
+                s.carNightDim ? 0xFFFF5252 : UiStyle.BORDER_SUBTLE, 12.5f);
+        dimBtn.setPadding(UiStyle.dp(this, 10), UiStyle.dp(this, 8), UiStyle.dp(this, 10), UiStyle.dp(this, 8));
+        dimBtn.setOnClickListener(v -> {
+            UiStyle.hapticTick(v, this);
+            s.carNightDim = !s.carNightDim;
+            store.save();
+            applyNightDimVisual();
+            buildUi();
+        });
+        top.addView(dimBtn, UiStyle.wrapLp(0, hGap));
+
+        // #31 GPS Speed-Linked Highway Boost Toggle
+        TextView gpsBtn = makeBigAction(
+                s.carGpsHighway ? "🛰 ON" : "🛰",
+                s.carGpsHighway ? 0xFF00E676 : UiStyle.TEXT_SECONDARY,
+                s.carGpsHighway ? 0x3300E676 : UiStyle.SURFACE_ELEV,
+                s.carGpsHighway ? 0xFF00E676 : UiStyle.BORDER_SUBTLE, 11.5f);
+        gpsBtn.setPadding(UiStyle.dp(this, 10), UiStyle.dp(this, 8), UiStyle.dp(this, 10), UiStyle.dp(this, 8));
+        gpsBtn.setOnClickListener(v -> {
+            UiStyle.hapticTick(v, this);
+            if (!s.carGpsHighway && !carExtras.hasLocationPermission()) {
+                requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION}, REQ_LOC_PERM);
+                return;
+            }
+            s.carGpsHighway = !s.carGpsHighway;
+            store.save();
+            if (s.carGpsHighway) carExtras.startGpsSpeed((kmh, autoHwy) -> runOnUiThread(this::refreshClockAndBattery));
+            else carExtras.stopGpsSpeed();
+            buildUi();
+        });
+        top.addView(gpsBtn, UiStyle.wrapLp(0, hGap));
 
         TextView vizBtn = makeBigAction(
-                s.carVizBackdrop ? "VIZ ON" : "VIZ OFF",
+                s.carVizBackdrop ? "VIZ" : "VIZ",
                 s.carVizBackdrop ? accent : UiStyle.TEXT_SECONDARY,
                 s.carVizBackdrop ? EqStore.withAlpha(accent, 34) : UiStyle.SURFACE_ELEV,
-                s.carVizBackdrop ? accent : UiStyle.BORDER_SUBTLE, 12f);
-        vizBtn.setPadding(UiStyle.dp(this, 12), UiStyle.dp(this, 9), UiStyle.dp(this, 12), UiStyle.dp(this, 9));
+                s.carVizBackdrop ? accent : UiStyle.BORDER_SUBTLE, 11.5f);
+        vizBtn.setPadding(UiStyle.dp(this, 10), UiStyle.dp(this, 8), UiStyle.dp(this, 10), UiStyle.dp(this, 8));
         vizBtn.setOnClickListener(v -> {
             UiStyle.hapticTick(v, this);
             s.carVizBackdrop = !s.carVizBackdrop;
@@ -174,18 +379,23 @@ public class CarModeActivity extends Activity {
             syncBackdropListener();
             buildUi();
         });
-        LinearLayout.LayoutParams vLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        vLp.rightMargin = UiStyle.dp(this, 8);
-        top.addView(vizBtn, vLp);
+        top.addView(vizBtn, UiStyle.wrapLp(0, hGap));
 
-        TextView exitBtn = makeBigAction("EXIT", 0xFFCBD5E1, UiStyle.SURFACE_ELEV, UiStyle.BORDER_SUBTLE, 12.5f);
-        exitBtn.setPadding(UiStyle.dp(this, 14), UiStyle.dp(this, 9), UiStyle.dp(this, 14), UiStyle.dp(this, 9));
+        TextView exitBtn = makeBigAction("EXIT", 0xFFCBD5E1, UiStyle.SURFACE_ELEV, UiStyle.BORDER_SUBTLE, 11.5f);
+        exitBtn.setPadding(UiStyle.dp(this, 10), UiStyle.dp(this, 8), UiStyle.dp(this, 10), UiStyle.dp(this, 8));
         exitBtn.setOnClickListener(v -> {
             UiStyle.hapticTick(v, this);
             finish();
         });
-        top.addView(exitBtn);
+        top.addView(exitBtn, UiStyle.wrapLp(0, hGap));
+
+        TextView stopAllBtn = makeBigAction("⏻", 0xFFFF5252, 0x33FF1744, 0xFFFF5252, 13f);
+        stopAllBtn.setPadding(UiStyle.dp(this, 10), UiStyle.dp(this, 8), UiStyle.dp(this, 10), UiStyle.dp(this, 8));
+        stopAllBtn.setOnClickListener(v -> {
+            UiStyle.hapticTick(v, this);
+            EqService.shutdownAppAndMusic(this);
+        });
+        top.addView(stopAllBtn);
         root.addView(top);
 
         if (landscape) {
@@ -247,12 +457,14 @@ public class CarModeActivity extends Activity {
         abBtn.setOnClickListener(v -> {
             UiStyle.hapticTick(v, this);
             engine.setAbFlatCompare(!engine.isAbFlatCompare());
+            EqService.startOrRefresh(this);
             buildUi();
         });
         powerRow.addView(abBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.8f));
         root.addView(powerRow);
 
-        ScrollView sv = new ScrollView(this);
+        presetScroll = new ScrollView(this);
+        ScrollView sv = presetScroll;
         LinearLayout.LayoutParams svLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
         svLp.topMargin = UiStyle.dp(this, 12);
@@ -382,6 +594,7 @@ public class CarModeActivity extends Activity {
         abBtn.setOnClickListener(v -> {
             UiStyle.hapticTick(v, this);
             engine.setAbFlatCompare(!engine.isAbFlatCompare());
+            EqService.startOrRefresh(this);
             buildUi();
         });
         btnRow.addView(abBtn, new LinearLayout.LayoutParams(0, UiStyle.dp(this, 50), 0.9f));
@@ -394,7 +607,8 @@ public class CarModeActivity extends Activity {
         LinearLayout right = new LinearLayout(this);
         right.setOrientation(LinearLayout.VERTICAL);
 
-        ScrollView sv = new ScrollView(this);
+        presetScroll = new ScrollView(this);
+        ScrollView sv = presetScroll;
         sv.addView(buildPresetGrid(3, active));
         LinearLayout.LayoutParams svLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
@@ -426,7 +640,9 @@ public class CarModeActivity extends Activity {
                 UiStyle.hapticTick(v, this);
                 store.setActivePreset(p.id);
                 engine.setAbFlatCompare(false);
+                engine.triggerSmoothRamp();
                 EqService.startOrRefresh(this);
+                if (carExtras != null) carExtras.announcePreset(p.name);
                 buildUi();
             });
             GridLayout.LayoutParams glp = new GridLayout.LayoutParams();
@@ -516,8 +732,9 @@ public class CarModeActivity extends Activity {
         TextView prev = makeBigAction("⏮  PREV", UiStyle.TEXT_PRIMARY, 0xDD0E1118, UiStyle.BORDER_SUBTLE, 15.5f);
         prev.setOnClickListener(v -> {
             UiStyle.hapticTick(v, this);
-            if (shouldControlInAppYouTube()) {
-                YouTubePlayerView.getActiveRemoteBridge().playPrev();
+            YouTubePlayerView.RemoteBridge inApp = shouldControlInAppYouTube() ? YouTubePlayerView.getActiveRemoteBridge() : null;
+            if (inApp != null) {
+                inApp.playPrev();
             } else {
                 KokerMediaListenerService.skipPrev(this);
             }
@@ -527,8 +744,9 @@ public class CarModeActivity extends Activity {
         playPauseBtn = makeBigAction("⏯  PLAY / PAUSE", accent, EqStore.withAlpha(accent, 42), accent, 15.5f);
         playPauseBtn.setOnClickListener(v -> {
             UiStyle.hapticTick(v, this);
-            if (shouldControlInAppYouTube()) {
-                YouTubePlayerView.getActiveRemoteBridge().togglePlayPause();
+            YouTubePlayerView.RemoteBridge inApp = shouldControlInAppYouTube() ? YouTubePlayerView.getActiveRemoteBridge() : null;
+            if (inApp != null) {
+                inApp.togglePlayPause();
             } else {
                 KokerMediaListenerService.playPause(this);
             }
@@ -538,8 +756,9 @@ public class CarModeActivity extends Activity {
         TextView next = makeBigAction("NEXT  ⏭", UiStyle.TEXT_PRIMARY, 0xDD0E1118, UiStyle.BORDER_SUBTLE, 15.5f);
         next.setOnClickListener(v -> {
             UiStyle.hapticTick(v, this);
-            if (shouldControlInAppYouTube()) {
-                YouTubePlayerView.getActiveRemoteBridge().playNext();
+            YouTubePlayerView.RemoteBridge inApp = shouldControlInAppYouTube() ? YouTubePlayerView.getActiveRemoteBridge() : null;
+            if (inApp != null) {
+                inApp.playNext();
             } else {
                 KokerMediaListenerService.skipNext(this);
             }

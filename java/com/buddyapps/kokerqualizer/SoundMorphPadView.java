@@ -23,6 +23,7 @@ public class SoundMorphPadView extends View {
     private boolean locked = false;
     private Listener listener;
     private long lastTapMs = 0;
+    private boolean doubleTapReset = false;
 
     private final Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -149,9 +150,11 @@ public class SoundMorphPadView extends View {
         int a = e.getActionMasked();
         if (a == MotionEvent.ACTION_DOWN) {
             if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+            doubleTapReset = false;
             long now = System.currentTimeMillis();
             if (now - lastTapMs < 320) {
                 lastTapMs = 0;
+                doubleTapReset = true;
                 posX = 0f;
                 posY = 0f;
                 UiStyle.hapticTick(this, getContext());
@@ -166,11 +169,13 @@ public class SoundMorphPadView extends View {
             updateFromTouch(e.getX(), e.getY());
             return true;
         } else if (a == MotionEvent.ACTION_MOVE) {
+            if (doubleTapReset) return true;
             updateFromTouch(e.getX(), e.getY());
             return true;
         } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
             if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
-            if (listener != null) listener.onMorphFinished(posX, posY);
+            if (!doubleTapReset && listener != null) listener.onMorphFinished(posX, posY);
+            doubleTapReset = false;
             return true;
         }
         return super.onTouchEvent(e);

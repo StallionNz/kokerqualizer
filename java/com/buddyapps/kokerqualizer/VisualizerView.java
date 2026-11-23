@@ -15,6 +15,10 @@ public class VisualizerView extends View {
     private int mode = EqStore.VIZ_BARS;
     private int accentColor = 0xFF39FF14;
     private boolean eqActive = true;
+    private int decaySpeed = 1;           // #13 0=Slow, 1=Med, 2=Fast
+    private boolean gradientBars = false; // #14 multi-color neon gradient
+    private boolean showEqOverlay = true; // #11 FabFilter-style EQ curve overlay
+    private float[] eqOverlayGains = null;
 
     private final float[] bars = new float[24];
     private final float[] peaks = new float[24];
@@ -31,12 +35,17 @@ public class VisualizerView extends View {
     private final Paint peakPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint wavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint waveGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint overlayPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint overlayGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ledPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path wavePath = new Path();
+    private final Path overlayPath = new Path();
     private final RectF rectF = new RectF();
     private int cachedBarH = -1;
+    private int cachedBarW = -1;
     private int cachedBarCol = 0;
+    private boolean cachedGrad = false;
 
     public VisualizerView(Context context) {
         super(context);
@@ -56,6 +65,16 @@ public class VisualizerView extends View {
         waveGlowPaint.setStrokeWidth(UiStyle.dpf(context, 6.5f));
         waveGlowPaint.setStrokeCap(Paint.Cap.ROUND);
         waveGlowPaint.setStrokeJoin(Paint.Join.ROUND);
+
+        overlayPaint.setStyle(Paint.Style.STROKE);
+        overlayPaint.setStrokeWidth(UiStyle.dpf(context, 1.8f));
+        overlayPaint.setStrokeCap(Paint.Cap.ROUND);
+        overlayPaint.setStrokeJoin(Paint.Join.ROUND);
+
+        overlayGlowPaint.setStyle(Paint.Style.STROKE);
+        overlayGlowPaint.setStrokeWidth(UiStyle.dpf(context, 5.2f));
+        overlayGlowPaint.setStrokeCap(Paint.Cap.ROUND);
+        overlayGlowPaint.setStrokeJoin(Paint.Join.ROUND);
 
         textPaint.setTextSize(UiStyle.dpf(context, 10f));
         textPaint.setColor(UiStyle.TEXT_MUTED);
@@ -77,15 +96,36 @@ public class VisualizerView extends View {
         invalidate();
     }
 
+    public void setDecaySpeed(int speed) {
+        this.decaySpeed = Math.max(0, Math.min(2, speed));
+    }
+
+    public void setGradientBars(boolean grad) {
+        if (this.gradientBars != grad) {
+            this.gradientBars = grad;
+            cachedBarCol = 0;
+            invalidate();
+        }
+    }
+
+    public void setEqOverlayCurve(float[] gains, boolean show) {
+        this.eqOverlayGains = gains != null ? Arrays.copyOf(gains, gains.length) : null;
+        this.showEqOverlay = show;
+        invalidate();
+    }
+
     public void updateAudio(float[] newBars, float[] newWave, float l, float r, boolean clip) {
+        float peakStep = decaySpeed == 0 ? 0.007f : (decaySpeed == 2 ? 0.030f : 0.015f);
+        float barFall = decaySpeed == 0 ? 0.88f : (decaySpeed == 2 ? 0.52f : 0.72f);
         if (newBars != null) {
             int n = Math.min(bars.length, newBars.length);
             for (int i = 0; i < n; i++) {
-                bars[i] = newBars[i];
+                float nb = newBars[i];
+                bars[i] = nb >= bars[i] ? nb : (bars[i] * barFall + nb * (1f - barFall));
                 if (bars[i] > peaks[i]) {
                     peaks[i] = bars[i];
                 } else {
-                    peaks[i] = Math.max(0f, peaks[i] - 0.015f);
+                    peaks[i] = Math.max(0f, peaks[i] - peakStep);
                 }
             }
         }
@@ -94,8 +134,8 @@ public class VisualizerView extends View {
         }
         vuL = l;
         vuR = r;
-        peakVuL = l > peakVuL ? l : Math.max(0f, peakVuL - 0.012f);
-        peakVuR = r > peakVuR ? r : Math.max(0f, peakVuR - 0.012f);
+        peakVuL = l > peakVuL ? l : Math.max(0f, peakVuL - peakStep * 0.85f);
+        peakVuR = r > peakVuR ? r : Math.max(0f, peakVuR - peakStep * 0.85f);
         if (clip) lastClipMs = System.currentTimeMillis();
         postInvalidateOnAnimation();
     }
@@ -126,10 +166,35 @@ public class VisualizerView extends View {
 
         if (mode == EqStore.VIZ_BARS) {
             drawBars(canvas, w, h, pad, col);
+            if (showEqOverlay) drawEqOverlay(canvas, w, h, pad, col);
         } else if (mode == EqStore.VIZ_WAVE) {
             drawWave(canvas, w, h, pad, col);
+        } else if (mode == EqStore.VIZ_MIRROR) {
+            drawMirrorBars(canvas, w, h, pad, col);
+            if (showEqOverlay) drawEqOverlay(canvas, w, h, pad, col);
         } else {
             drawVu(canvas, w, h, pad, col);
+        }
+    }
+
+    private void ensureBarShader(float w, float bottom, float pad, int col) {
+        if (cachedBarH == (int) bottom && cachedBarW == (int) w && cachedBarCol == col && cachedGrad == gradientBars) return;
+        cachedBarH = (int) bottom;
+        cachedBarW = (int) w;
+        cachedBarCol = col;
+        cachedGrad = gradientBars;
+        if (gradientBars && eqActive) {
+            barPaint.setShader(new LinearGradient(
+                    pad, 0, w - pad, 0,
+                    new int[]{0xFF39FF14, 0xFF00E5FF, 0xFFB388FF, 0xFFFF2E93},
+                    new float[]{0f, 0.35f, 0.70f, 1f},
+                    Shader.TileMode.CLAMP));
+        } else {
+            barPaint.setShader(new LinearGradient(
+                    0, bottom, 0, pad,
+                    EqStore.withAlpha(col, 95),
+                    col,
+                    Shader.TileMode.CLAMP));
         }
     }
 
@@ -142,15 +207,7 @@ public class VisualizerView extends View {
         float maxH = h - pad * 2.2f;
         float rad = UiStyle.dpf(getContext(), 2.5f);
 
-        if (cachedBarH != (int) h || cachedBarCol != col) {
-            cachedBarH = (int) h;
-            cachedBarCol = col;
-            barPaint.setShader(new LinearGradient(
-                    0, bottom, 0, pad,
-                    EqStore.withAlpha(col, 95),
-                    col,
-                    Shader.TileMode.CLAMP));
-        }
+        ensureBarShader(w, bottom, pad, col);
         glowPaint.setColor(EqStore.withAlpha(col, 40));
         peakPaint.setColor(0xEEFFFFFF);
 
@@ -159,21 +216,84 @@ public class VisualizerView extends View {
             float bh = Math.max(UiStyle.dpf(getContext(), 2.5f), bars[i] * maxH);
             float top = bottom - bh;
 
-            // Subtle outer glow bar
             rectF.set(x - 1.5f, top - 2f, x + bw + 1.5f, bottom);
             canvas.drawRoundRect(rectF, rad, rad, glowPaint);
 
-            // Crisp neon bar
             rectF.set(x, top, x + bw, bottom);
             canvas.drawRoundRect(rectF, rad, rad, barPaint);
 
-            // Peak hold cap
             if (peaks[i] > 0.03f) {
                 float py = bottom - peaks[i] * maxH;
                 rectF.set(x, py - UiStyle.dpf(getContext(), 2.4f), x + bw, py);
                 canvas.drawRoundRect(rectF, 1.5f, 1.5f, peakPaint);
             }
         }
+    }
+
+    // #12 Symmetrical Mirror Spectrum Visualizer
+    private void drawMirrorBars(Canvas canvas, float w, float h, float pad, int col) {
+        int n = bars.length;
+        float availW = w - pad * 2;
+        float gap = UiStyle.dpf(getContext(), 3f);
+        float bw = Math.max(2f, (availW - gap * (n - 1)) / n);
+        float midY = h * 0.5f;
+        float halfMax = (h - pad * 2.2f) * 0.5f;
+        float rad = UiStyle.dpf(getContext(), 2.5f);
+
+        ensureBarShader(w, h - pad, pad, col);
+        glowPaint.setColor(EqStore.withAlpha(col, 42));
+        peakPaint.setColor(0xCCFFFFFF);
+
+        for (int i = 0; i < n; i++) {
+            float x = pad + i * (bw + gap);
+            float halfH = Math.max(UiStyle.dpf(getContext(), 2.0f), bars[i] * halfMax);
+            rectF.set(x - 1.2f, midY - halfH - 1.5f, x + bw + 1.2f, midY + halfH + 1.5f);
+            canvas.drawRoundRect(rectF, rad, rad, glowPaint);
+
+            rectF.set(x, midY - halfH, x + bw, midY + halfH);
+            canvas.drawRoundRect(rectF, rad, rad, barPaint);
+
+            if (peaks[i] > 0.04f) {
+                float py = peaks[i] * halfMax;
+                rectF.set(x, midY - py - 2f, x + bw, midY - py);
+                canvas.drawRoundRect(rectF, 1f, 1f, peakPaint);
+                rectF.set(x, midY + py, x + bw, midY + py + 2f);
+                canvas.drawRoundRect(rectF, 1f, 1f, peakPaint);
+            }
+        }
+    }
+
+    // #11 FabFilter-Style Live EQ Response Curve Overlay
+    private void drawEqOverlay(Canvas canvas, float w, float h, float pad, int col) {
+        float[] g = eqOverlayGains;
+        if (g == null || g.length < 2) return;
+        int n = g.length;
+        float availW = w - pad * 2;
+        float midY = h * 0.5f;
+        float halfH = (h - pad * 2.2f) * 0.45f;
+
+        overlayPath.reset();
+        for (int i = 0; i < n; i++) {
+            float x = pad + (availW * i) / (n - 1);
+            float norm = EqStore.clamp(g[i] / EqStore.MAX_GAIN_DB, -1f, 1f);
+            float y = midY - norm * halfH;
+            if (i == 0) {
+                overlayPath.moveTo(x, y);
+            } else {
+                float px = pad + (availW * (i - 1)) / (n - 1);
+                float pn = EqStore.clamp(g[i - 1] / EqStore.MAX_GAIN_DB, -1f, 1f);
+                float py = midY - pn * halfH;
+                overlayPath.quadTo(px, py, (px + x) * 0.5f, (py + y) * 0.5f);
+            }
+        }
+        float lastX = pad + availW;
+        float lastY = midY - EqStore.clamp(g[n - 1] / EqStore.MAX_GAIN_DB, -1f, 1f) * halfH;
+        overlayPath.lineTo(lastX, lastY);
+
+        overlayGlowPaint.setColor(EqStore.withAlpha(0xFFFFFFFF, eqActive ? 55 : 22));
+        canvas.drawPath(overlayPath, overlayGlowPaint);
+        overlayPaint.setColor(EqStore.withAlpha(0xFFFFFFFF, eqActive ? 195 : 85));
+        canvas.drawPath(overlayPath, overlayPaint);
     }
 
     private void drawWave(Canvas canvas, float w, float h, float pad, int col) {

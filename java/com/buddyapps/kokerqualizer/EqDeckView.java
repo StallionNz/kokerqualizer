@@ -40,6 +40,7 @@ public class EqDeckView extends View {
     private Listener listener;
 
     private int draggingBand = -1;
+    private boolean bandMutatedInDrag = false;
     private int lastBrushBand = -1;
     private float lastBrushDb = 0f;
     private int lastTappedBand = -1;
@@ -318,8 +319,7 @@ public class EqDeckView extends View {
 
             if (draggingBand < 0) {
                 valPaint.setColor(Math.abs(gains[i]) > 0.05f ? UiStyle.TEXT_PRIMARY : UiStyle.TEXT_MUTED);
-                String dbTxt = Math.abs(gains[i]) < 0.05f ? "0" : String.format(Locale.US, "%+.0f", gains[i]);
-                canvas.drawText(dbTxt, x, UiStyle.dpf(getContext(), 17f), valPaint);
+                canvas.drawText(formatCompactDb(gains[i]), x, UiStyle.dpf(getContext(), 17f), valPaint);
             }
         }
     }
@@ -382,10 +382,16 @@ public class EqDeckView extends View {
 
             if (draggingBand < 0) {
                 valPaint.setColor(Math.abs(gains[i]) > 0.05f ? UiStyle.TEXT_PRIMARY : UiStyle.TEXT_MUTED);
-                String dbTxt = Math.abs(gains[i]) < 0.05f ? "0" : String.format(Locale.US, "%+.0f", gains[i]);
-                canvas.drawText(dbTxt, xs[i], UiStyle.dpf(getContext(), 17f), valPaint);
+                canvas.drawText(formatCompactDb(gains[i]), xs[i], UiStyle.dpf(getContext(), 17f), valPaint);
             }
         }
+    }
+
+    private String formatCompactDb(float g) {
+        float abs = Math.abs(g);
+        if (abs < 0.05f) return "0";
+        if (abs < 0.95f) return String.format(Locale.US, "%+.1f", g);
+        return String.format(Locale.US, "%+.0f", g);
     }
 
     @Override
@@ -427,17 +433,27 @@ public class EqDeckView extends View {
             lastTappedBand = idx;
             lastTapMs = now;
             draggingBand = idx;
+            bandMutatedInDrag = false;
             pendingLpBand = idx;
             preLpDb = gains[idx];
             lastBrushBand = idx;
             lastBrushDb = yToDb(e.getY());
             lastHapticStep = Math.round(gains[idx]);
             lpHandler.postDelayed(lpRunnable, 480);
-            applyDrag(idx, lastBrushDb);
+            // If user taps directly on the existing thumb/node (e.g. to long-press for 0.1dB fine tune),
+            // avoid jumping audio until they actually drag past touch slop!
+            if (Math.abs(e.getY() - dbToY(gains[idx])) > UiStyle.dpf(getContext(), 22f)) {
+                applyDrag(idx, lastBrushDb);
+            } else {
+                invalidate();
+            }
             return true;
         } else if (action == MotionEvent.ACTION_MOVE) {
             if (lpTriggered) return true;
-            if (Math.hypot(e.getX() - downX, e.getY() - downY) > slop) {
+            if (pendingLpBand >= 0) {
+                if (Math.hypot(e.getX() - downX, e.getY() - downY) <= slop) {
+                    return true; // Keep holding steady for 0.1 dB long-press without jitter-jumping!
+                }
                 lpHandler.removeCallbacks(lpRunnable);
                 pendingLpBand = -1;
             }
@@ -467,9 +483,10 @@ public class EqDeckView extends View {
             lpHandler.removeCallbacks(lpRunnable);
             pendingLpBand = -1;
             if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
-            if (!lpTriggered && draggingBand >= 0 && listener != null) {
+            if (!lpTriggered && bandMutatedInDrag && draggingBand >= 0 && listener != null) {
                 listener.onBandChangeFinished();
             }
+            bandMutatedInDrag = false;
             draggingBand = -1;
             lastBrushBand = -1;
             invalidate();
@@ -484,6 +501,7 @@ public class EqDeckView extends View {
             invalidate();
             return;
         }
+        bandMutatedInDrag = true;
         boolean crossedZero = (gains[idx] != 0f && newDb == 0f);
         gains[idx] = newDb;
         int step = Math.round(newDb / 3f);

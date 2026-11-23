@@ -36,6 +36,7 @@ public class RotaryKnobView extends View {
 
     private float downY;
     private float startVal;
+    private boolean knobMutatedInDrag = false;
     private long lastTapMs = 0;
     private int lastTickBucket = Integer.MIN_VALUE;
     private ValueAnimator knobAnim;
@@ -246,18 +247,21 @@ public class RotaryKnobView extends View {
             lastTapMs = now;
             downY = e.getY();
             startVal = value;
-            lastTickBucket = Math.round(((value - minVal) / (maxVal - minVal)) * 18f);
+            knobMutatedInDrag = false;
+            float range = Math.max(0.0001f, maxVal - minVal);
+            lastTickBucket = Math.round(((value - minVal) / range) * 18f);
             return true;
         } else if (a == MotionEvent.ACTION_MOVE) {
             if (locked) return true;
             float dy = downY - e.getY();
-            float range = maxVal - minVal;
+            float range = Math.max(0.0001f, maxVal - minVal);
             float sensitivity = UiStyle.dpf(getContext(), 150f);
             float next = EqStore.clamp(startVal + (dy / sensitivity) * range, minVal, maxVal);
             if (bipolar && Math.abs(next - defaultVal) < range * 0.025f) {
                 next = defaultVal;
             }
             if (Math.abs(next - value) > 0.01f) {
+                knobMutatedInDrag = true;
                 value = next;
                 int bucket = Math.round(((value - minVal) / range) * 18f);
                 if (bucket != lastTickBucket) {
@@ -270,9 +274,10 @@ public class RotaryKnobView extends View {
             return true;
         } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
             if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
-            if (!locked && listener != null) {
+            if (!locked && knobMutatedInDrag && listener != null) {
                 listener.onValueFinished(value);
             }
+            knobMutatedInDrag = false;
             return true;
         }
         return super.onTouchEvent(e);

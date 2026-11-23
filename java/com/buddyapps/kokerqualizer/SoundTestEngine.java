@@ -135,9 +135,10 @@ public class SoundTestEngine {
                 track.write(pcm, 0, pcm.length);
 
                 long now = System.currentTimeMillis();
-                if (freqCallback != null && now - lastReportMs > 90) {
+                FreqCallback cb = freqCallback;
+                if (cb != null && now - lastReportMs > 90) {
                     lastReportMs = now;
-                    freqCallback.onCurrentFreq(freq);
+                    cb.onCurrentFreq(freq);
                 }
             }
         } catch (Throwable ignored) {

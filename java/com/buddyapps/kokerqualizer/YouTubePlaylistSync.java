@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -31,6 +32,7 @@ public class YouTubePlaylistSync {
     }
 
     private static final Pattern LIST_PARAM = Pattern.compile("[?&]list=([A-Za-z0-9_-]{10,80})");
+    private static final AtomicInteger SYNC_GEN = new AtomicInteger(0);
 
     public static String extractPlaylistId(String input) {
         if (input == null) return null;
@@ -59,6 +61,7 @@ public class YouTubePlaylistSync {
     }
 
     public static void syncAsync(String playlistId, Callback callback) {
+        final int gen = SYNC_GEN.incrementAndGet();
         final Handler main = new Handler(Looper.getMainLooper());
         new Thread(() -> {
             try {
@@ -66,16 +69,17 @@ public class YouTubePlaylistSync {
                 if (res == null || res.tracks.isEmpty()) {
                     res = fetchViaRss(playlistId);
                 }
+                if (gen != SYNC_GEN.get()) return; // Discard stale superseded sync
                 if (res != null && !res.tracks.isEmpty()) {
                     final SyncResult ok = res;
-                    main.post(() -> callback.onSuccess(ok.title, ok.tracks));
+                    main.post(() -> { if (gen == SYNC_GEN.get()) callback.onSuccess(ok.title, ok.tracks); });
                 } else {
-                    main.post(() -> callback.onError(
-                            "No tracks found. Make sure the playlist is Public or Unlisted (or use Full YT Mode to sign in)."));
+                    main.post(() -> { if (gen == SYNC_GEN.get()) callback.onError(
+                            "No tracks found. Make sure the playlist is Public or Unlisted (or use Full YT Mode to sign in)."); });
                 }
             } catch (Throwable t) {
                 final String msg = t.getMessage() != null ? t.getMessage() : "Network error";
-                main.post(() -> callback.onError("Sync failed: " + msg));
+                main.post(() -> { if (gen == SYNC_GEN.get()) callback.onError("Sync failed: " + msg); });
             }
         }, "KokerYTSync").start();
     }
@@ -331,7 +335,10 @@ public class YouTubePlaylistSync {
                  BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
                 StringBuilder sb = new StringBuilder();
                 String line;
-                while ((line = br.readLine()) != null) sb.append(line).append('\n');
+                while ((line = br.readLine()) != null) {
+                    sb.append(line).append('\n');
+                    if (sb.length() > 6 * 1024 * 1024) break;
+                }
                 return sb.toString();
             }
         } finally {

@@ -43,16 +43,19 @@ public class KokerWidgetProvider extends AppWidgetProvider {
             store.save();
             EqService.startOrRefresh(context);
             updateAll(context);
+            KokerMiniWidgetProvider.updateAll(context);
         } else if (ACTION_PREV.equals(a)) {
             store.cyclePreset(-1);
             EqEngine.get(context).setAbFlatCompare(false);
             EqService.startOrRefresh(context);
             updateAll(context);
+            KokerMiniWidgetProvider.updateAll(context);
         } else if (ACTION_NEXT.equals(a)) {
             store.cyclePreset(1);
             EqEngine.get(context).setAbFlatCompare(false);
             EqService.startOrRefresh(context);
             updateAll(context);
+            KokerMiniWidgetProvider.updateAll(context);
         }
     }
 

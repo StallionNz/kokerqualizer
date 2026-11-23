@@ -10,6 +10,8 @@ import android.media.audiofx.Equalizer;
 import android.media.audiofx.PresetReverb;
 import android.media.audiofx.Virtualizer;
 import android.media.audiofx.Visualizer;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import java.util.Arrays;
@@ -42,6 +44,12 @@ public class EqEngine {
     private int currentDpBandCount = 10;
     private boolean mbcSupported = false;
     private boolean abFlatCompare = false;
+    private int compareMode = 0; // #16: 0=Active(A), 1=Flat, 2=Slot B
+    private int soloBandIndex = -1; // #19: -1=off, 0..14=solo audition band
+    private float sleepFadeDb = 0f; // #32: sleep timer smooth fade-out (-32..0 dB)
+    private float rampGainOffsetDb = 0f; // #7: smooth gain ramp on switch
+    private final Handler rampHandler = new Handler(Looper.getMainLooper());
+    private int rampStepsLeft = 0;
     private boolean visualizerListening = false;
 
     private String statusText = "Initializing...";
@@ -51,7 +59,10 @@ public class EqEngine {
     private float lastPeakBoostDb = 0f;
     private float lastMbcAmount = 0f;
     private float lastLoudnessBoostDb = 0f;
-    private float smoothBassEnergy = 0f;
+    private volatile float smoothBassEnergy = 0f;
+    private volatile float lastPeakDbfs = -60f; // #10
+    private volatile int clipCount = 0;         // #10
+    private long lastClipIncrementMs = 0L;
 
     private VisualizerListener vizListener;
     private StatusListener statusListener;
@@ -85,10 +96,82 @@ public class EqEngine {
 
     public synchronized void setAbFlatCompare(boolean flat) {
         this.abFlatCompare = flat;
+        this.compareMode = flat ? 1 : 0;
+        triggerSmoothRamp();
         applyCurrent();
     }
 
-    public synchronized boolean isAbFlatCompare() { return abFlatCompare; }
+    public synchronized void cycleCompareMode() {
+        EqStore store = EqStore.get(appCtx);
+        String bId = store.getSettings().comparePresetId;
+        boolean hasB = bId != null && store.findPreset(bId) != null && !bId.equals(store.getSettings().activePresetId);
+        if (compareMode == 0) {
+            compareMode = 1;
+            abFlatCompare = true;
+        } else if (compareMode == 1 && hasB) {
+            compareMode = 2;
+            abFlatCompare = false;
+        } else {
+            compareMode = 0;
+            abFlatCompare = false;
+        }
+        triggerSmoothRamp();
+        applyCurrent();
+    }
+
+    public synchronized int getCompareMode() { return compareMode; }
+    public synchronized boolean isAbFlatCompare() { return abFlatCompare || compareMode == 1; }
+    public synchronized void setSoloBandIndex(int idx) { this.soloBandIndex = idx; applyCurrent(); }
+    public synchronized int getSoloBandIndex() { return soloBandIndex; }
+    public synchronized void setSleepFadeDb(float db) { this.sleepFadeDb = EqStore.clamp(db, -36f, 0f); }
+    public float getLiveBassEnergy() { return smoothBassEnergy; }
+    public float getLastPeakDbfs() { return lastPeakDbfs; }
+    public int getClipCount() { return clipCount; }
+    public void resetClipCount() { clipCount = 0; }
+
+    public synchronized boolean autoTrimPreamp() {
+        EqStore store = EqStore.get(appCtx);
+        EqStore.EqPreset p = store.getActivePreset();
+        if (p == null) return false;
+        p.preampDb = EqStore.clamp(Math.round((p.preampDb - 2.0f) * 10f) / 10f, -12f, 12f);
+        store.addOrUpdatePreset(p);
+        clipCount = 0;
+        applyCurrent();
+        return true;
+    }
+
+    public synchronized void triggerSmoothRamp() {
+        EqStore.Settings s = EqStore.get(appCtx).getSettings();
+        if (!s.eqEnabled || !s.smoothGainRamp) {
+            rampHandler.removeCallbacksAndMessages(null);
+            rampStepsLeft = 0;
+            rampGainOffsetDb = 0f;
+            return;
+        }
+        rampHandler.removeCallbacksAndMessages(null);
+        rampGainOffsetDb = -10f;
+        rampStepsLeft = 6;
+        rampHandler.postDelayed(rampTick, 40);
+    }
+
+    private final Runnable rampTick = new Runnable() {
+        @Override
+        public void run() {
+            synchronized (EqEngine.this) {
+                if (rampStepsLeft <= 1) {
+                    rampStepsLeft = 0;
+                    rampGainOffsetDb = 0f;
+                    applyCurrent();
+                    return;
+                }
+                rampStepsLeft--;
+                rampGainOffsetDb = -10f * (rampStepsLeft / 6f);
+                applyCurrent();
+                rampHandler.postDelayed(this, 40);
+            }
+        }
+    };
+
     public synchronized String getStatusText() { return statusText; }
     public synchronized boolean isEngineActive() { return engineActive; }
     public synchronized boolean isDynamicsProcessingActive() { return dp != null && engineActive; }
@@ -146,10 +229,23 @@ public class EqEngine {
         return lastOpenedMediaSession > 0 ? lastOpenedMediaSession : 0;
     }
 
+    private EqStore.EqPreset getEffectivePreset(EqStore store) {
+        EqStore.EqPreset p = store.getActivePreset();
+        if (compareMode == 2) {
+            String bId = store.getSettings().comparePresetId;
+            if (bId != null) {
+                EqStore.EqPreset alt = store.findPreset(bId);
+                if (alt != null) return alt;
+            }
+            compareMode = 0;
+        }
+        return p;
+    }
+
     public synchronized void rebuildIfNeeded(boolean force) {
         EqStore store = EqStore.get(appCtx);
         EqStore.Settings s = store.getSettings();
-        EqStore.EqPreset p = store.getActivePreset();
+        EqStore.EqPreset p = getEffectivePreset(store);
         if (p == null) return;
         int targetSession = chooseTargetSession();
         int desiredBands = (s.bandMode == EqStore.BANDS_15) ? 15 : 10;
@@ -188,7 +284,7 @@ public class EqEngine {
 
         try { bassBoostFx = new BassBoost(0, activeSessionId); } catch (Throwable t) { bassBoostFx = null; }
         try { virtualizerFx = new Virtualizer(0, activeSessionId); } catch (Throwable t) { virtualizerFx = null; }
-        try { reverbFx = new PresetReverb(0, activeSessionId); } catch (Throwable t) { reverbFx = null; }
+        reverbFx = null; // Lazily created only when acoustic reverb is actually enabled!
 
         if (vizListener != null) startVisualizerIfPermitted();
     }
@@ -334,7 +430,7 @@ public class EqEngine {
             return;
         }
 
-        if (abFlatCompare) {
+        if (abFlatCompare || compareMode == 1) {
             applyFlatBypass();
             lastAutoGainDb = 0f;
             lastMbcAmount = 0f;
@@ -343,11 +439,65 @@ public class EqEngine {
             return;
         }
 
+        // #16 A/B/C Slot B comparison preset (already aligned with rebuildIfNeeded!)
+        p = getEffectivePreset(store);
+        if (p == null) return;
+
         int bc = currentDpBandCount;
         float[] effective = (bc == 15) ? Arrays.copyOf(p.bands15, 15) : Arrays.copyOf(p.bands10, 10);
         float[] centers = (bc == 15)
                 ? EqStore.PRO15_CENTERS
                 : (p.carSubMode ? EqStore.SUB_CENTERS : EqStore.ISO_CENTERS);
+
+        // #9 Quick Bass & Treble Macro Tilt sliders
+        if (Math.abs(p.bassTiltDb) > 0.05f || Math.abs(p.trebleTiltDb) > 0.05f) {
+            for (int i = 0; i < bc; i++) {
+                float hz = centers[i];
+                if (hz <= 260f && Math.abs(p.bassTiltDb) > 0.05f) {
+                    float w = hz <= 80f ? 1.0f : (hz <= 160f ? 0.72f : 0.40f);
+                    effective[i] += p.bassTiltDb * w;
+                }
+                if (hz >= 2400f && Math.abs(p.trebleTiltDb) > 0.05f) {
+                    float w = hz >= 8000f ? 1.0f : (hz >= 4000f ? 0.75f : 0.42f);
+                    effective[i] += p.trebleTiltDb * w;
+                }
+            }
+        }
+
+        // #1 Sub-Sonic High-Pass Rumble Filter (cuts 20-35 Hz door rattle cleanly!)
+        if (p.subSonicFilter) {
+            for (int i = 0; i < bc; i++) {
+                float hz = centers[i];
+                if (hz <= 32f) effective[i] -= 12.0f;
+                else if (hz <= 45f) effective[i] -= 4.0f;
+            }
+        }
+
+        // #2 Analog Warmth / Soft-Clip Exciter curve
+        if (p.analogWarmth) {
+            for (int i = 0; i < bc; i++) {
+                float hz = centers[i];
+                if (hz >= 80f && hz <= 260f) effective[i] += 2.2f;
+                else if (hz >= 3000f && hz <= 6500f) effective[i] += 1.0f;
+                else if (hz >= 12000f) effective[i] -= 1.2f;
+            }
+        }
+
+        // #6 Late-Night Whisper Boost (lifts dialogue clarity & tames boom)
+        if (p.nightWhisper) {
+            for (int i = 0; i < bc; i++) {
+                float hz = centers[i];
+                if (hz <= 65f) effective[i] -= 5.0f;
+                else if (hz >= 900f && hz <= 4200f) effective[i] += 4.2f;
+            }
+        }
+
+        // #19 Per-Band Solo Audition (isolates chosen band while cutting neighbors)
+        if (soloBandIndex >= 0 && soloBandIndex < bc) {
+            for (int i = 0; i < bc; i++) {
+                if (i != soloBandIndex) effective[i] = -16.0f;
+            }
+        }
 
         // Bass Boost character shaping by real Hz frequency (works seamlessly for both 10 & 15 bands!)
         float bassFrac = p.bassBoost / 100f;
@@ -417,10 +567,11 @@ public class EqEngine {
         }
 
         float hwyPre = s.highwayBoost ? 1.5f : 0f;
-        float baseGainL = EqStore.clamp(p.preampDb + hwyPre + autoCompDb + leftBalDb, -30f, 15f);
-        float baseGainR = EqStore.clamp(p.preampDb + hwyPre + autoCompDb + rightBalDb, -30f, 15f);
+        float dynRamp = rampGainOffsetDb + sleepFadeDb;
+        float baseGainL = EqStore.clamp(p.preampDb + hwyPre + autoCompDb + leftBalDb + dynRamp, -48f, 15f);
+        float baseGainR = EqStore.clamp(p.preampDb + hwyPre + autoCompDb + rightBalDb + dynRamp, -48f, 15f);
 
-        float mbcAmt = EqStore.clamp(p.punchMbc + (s.highwayBoost ? 18f : 0f), 0f, 100f);
+        float mbcAmt = EqStore.clamp(p.punchMbc + (s.highwayBoost ? 18f : 0f) + (p.analogWarmth ? 15f : 0f) + (p.nightWhisper ? 38f : 0f), 0f, 100f);
         lastMbcAmount = mbcAmt;
 
         if (dp != null) {
@@ -432,8 +583,11 @@ public class EqEngine {
                 float mbcFrac = mbcAmt / 100f;
                 boolean mbcOn = mbcFrac > 0.02f;
 
-                float limFrac = p.limiter / 100f;
-                float thresh = -0.3f - limFrac * 3.2f;
+                float limFrac = Math.max(p.limiter / 100f, p.nightWhisper ? 0.85f : 0f);
+                // #8 Selectable Limiter Ceiling (-0.1 dB Loud, -1.0 dB Safe, -3.0 dB Studio)
+                float ceilingBase = p.limiterCeilingMode == EqStore.LIM_LOUD ? -0.1f
+                        : (p.limiterCeilingMode == EqStore.LIM_STUDIO ? -3.0f : -1.0f);
+                float thresh = ceilingBase - limFrac * (p.nightWhisper ? 4.5f : 2.2f);
                 float ratio = 3.0f + limFrac * 17.0f;
                 float attack = 5.0f - limFrac * 4.2f;
                 float release = 110f - limFrac * 70f;
@@ -512,35 +666,43 @@ public class EqEngine {
 
         if (virtualizerFx != null) {
             try {
-                // Disable stereo widening in Mono Speaker mode for clean phase coherence
-                boolean useVirt = !s.monoAudio && p.virtualizer > 2f;
+                // Disable stereo widening in Mono Speaker mode; gently blend stereo in Headphone Crossfeed (#5)
+                boolean useVirt = !s.monoAudio && (p.virtualizer > 2f || p.crossfeed);
                 virtualizerFx.setEnabled(useVirt);
                 if (useVirt) {
-                    short strength = (short) Math.min(1000, Math.round(p.virtualizer * 10f));
+                    float effVirt = p.crossfeed ? Math.min(28f, Math.max(16f, p.virtualizer * 0.45f)) : p.virtualizer;
+                    short strength = (short) Math.min(1000, Math.round(effVirt * 10f));
                     virtualizerFx.setStrength(strength);
                 }
             } catch (Throwable ignored) {}
         }
 
-        if (reverbFx != null) {
-            try {
-                boolean useRev = p.reverbMode != EqStore.REVERB_OFF;
-                reverbFx.setEnabled(useRev);
-                if (useRev) {
+        boolean useRev = p.reverbMode != EqStore.REVERB_OFF;
+        if (useRev) {
+            if (reverbFx == null) {
+                try { reverbFx = new PresetReverb(0, activeSessionId); } catch (Throwable t) { reverbFx = null; }
+            }
+            if (reverbFx != null) {
+                try {
                     short preset = PresetReverb.PRESET_NONE;
                     if (p.reverbMode == EqStore.REVERB_STUDIO) preset = PresetReverb.PRESET_SMALLROOM;
                     else if (p.reverbMode == EqStore.REVERB_CLUB) preset = PresetReverb.PRESET_MEDIUMHALL;
                     else if (p.reverbMode == EqStore.REVERB_HALL) preset = PresetReverb.PRESET_LARGEHALL;
                     else if (p.reverbMode == EqStore.REVERB_CAR) preset = PresetReverb.PRESET_MEDIUMROOM;
                     reverbFx.setPreset(preset);
-                }
-            } catch (Throwable ignored) {}
+                    reverbFx.setEnabled(true);
+                } catch (Throwable ignored) {}
+            }
+        } else if (reverbFx != null) {
+            try { reverbFx.setEnabled(false); } catch (Throwable ignored) {}
+            try { reverbFx.release(); } catch (Throwable ignored) {}
+            reverbFx = null;
         }
 
         String modeTag = activeSessionId > 0 ? ("S#" + activeSessionId) : "Global";
         String bandTag = (bc == 15) ? "15B" : "10B";
         String engineTag = (dp != null) ? (mbcSupported ? (bandTag + "+MBC") : bandTag) : "EQ";
-        String extraTag = s.highwayBoost ? " • HWY" : (s.monoAudio ? " • MONO" : "");
+        String extraTag = compareMode == 2 ? " • SLOT B" : (s.highwayBoost ? " • HWY" : (s.monoAudio ? " • MONO" : ""));
         updateStatus(engineTag + " • " + modeTag + extraTag, true);
     }
 
@@ -562,6 +724,9 @@ public class EqEngine {
                             dp.setMbcBandByChannelIndex(ch, m, mb);
                         }
                     }
+                    DynamicsProcessing.Limiter lim = dp.getLimiterByChannelIndex(ch);
+                    lim.setEnabled(false);
+                    dp.setLimiterByChannelIndex(ch, lim);
                 }
             } catch (Throwable ignored) {}
         }
@@ -637,7 +802,16 @@ public class EqEngine {
         smoothVuL = targetL > smoothVuL ? smoothVuL * 0.4f + targetL * 0.6f : smoothVuL * 0.82f + targetL * 0.18f;
         smoothVuR = targetR > smoothVuR ? smoothVuR * 0.4f + targetR * 0.6f : smoothVuR * 0.82f + targetR * 0.18f;
 
-        boolean clipping = peakL > 0.94f || peakR > 0.94f;
+        float maxAmp = Math.max(peakL, peakR);
+        lastPeakDbfs = maxAmp > 0.001f ? (float) (20.0 * Math.log10(maxAmp)) : -60f;
+        boolean clipping = maxAmp > 0.94f;
+        if (clipping) {
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - lastClipIncrementMs > 500L) {
+                lastClipIncrementMs = nowMs;
+                clipCount++;
+            }
+        }
         VisualizerListener l = vizListener;
         if (l != null) l.onAudioData(smoothBars, waveBuf, smoothVuL, smoothVuR, clipping, smoothBassEnergy);
     }
@@ -684,6 +858,9 @@ public class EqEngine {
     }
 
     public synchronized void releaseDsp() {
+        rampHandler.removeCallbacksAndMessages(null);
+        rampStepsLeft = 0;
+        rampGainOffsetDb = 0f;
         if (dp != null) { try { dp.setEnabled(false); } catch (Throwable ignored) {} try { dp.release(); } catch (Throwable ignored) {} dp = null; }
         if (fallbackEq != null) { try { fallbackEq.setEnabled(false); } catch (Throwable ignored) {} try { fallbackEq.release(); } catch (Throwable ignored) {} fallbackEq = null; }
         if (bassBoostFx != null) { try { bassBoostFx.setEnabled(false); } catch (Throwable ignored) {} try { bassBoostFx.release(); } catch (Throwable ignored) {} bassBoostFx = null; }
