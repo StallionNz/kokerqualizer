@@ -69,4 +69,4 @@ Kokerqualizer uses plain Java 8 and the standard Android 36 SDK (`android.jar`, 
 
 ## License
 
-Licensed under the [MIT License](LICENSE).
+Licensed under the [Apache License, Version 2.0](LICENSE).
